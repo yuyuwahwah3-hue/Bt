@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment file lokal — JANGAN di-commit ke GitHub
+.env
+
+# Log & state file
+bot.log
+entries.log
+bot_state.json
+
+# Cache data candle (kalau tidak pakai Railway Volume, biar tidak ikut ke-commit)
+data_cache/
+
+# OS
+.DS_Store
+Thumbs.db
