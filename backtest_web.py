@@ -52,7 +52,11 @@ RINGKASAN STRATEGI
    Kalau gagal salah satu syarat di atas -> level GUGUR (hanya dicoba
    SEKALI, tidak dicari TEST1 berikutnya lagi).
 
-4) ENTRY -- LIMIT di UJUNG WICK candle TEST1 (Long -> high TEST1, Short ->
+4) FILTER RSI -- RSI(RSI_PERIOD=5, Wilder, close H1) di candle TEST2:
+   RSI > 51 -> Long gagal (hanya Short boleh); RSI < 51 -> Short gagal
+   (hanya Long boleh). Setup bullish tapi RSI5 > 51 -> level gugur.
+
+5) ENTRY -- LIMIT di UJUNG WICK candle TEST1 (Long -> high TEST1, Short ->
    low TEST1), dipasang LANGSUNG setelah TEST2 lolos (tanpa TEST3). Baru
    RESMI AKTIF (armed) begitu harga masuk radius APPROACH_PCT (default 2%)
    dari entry_price, lalu ditunggu sampai TERSENTUH. Kalau harga menjauh
@@ -98,6 +102,9 @@ SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', '0.01'))       # SL ADAPTI
 APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.02'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
 TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 3R
 TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
+
+RSI_PERIOD       = int(os.environ.get('RSI_PERIOD', '5'))             # RSI periode 5 (Wilder), dari close H1
+RSI_LEVEL        = float(os.environ.get('RSI_LEVEL', '51'))           # filter RSI candle TEST2: RSI > level -> Long gagal; RSI < level -> Short gagal
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
@@ -293,6 +300,19 @@ EMA_SLOW = int(os.environ.get('EMA_SLOW', 10))
 N_RIGHT = 1   # jumlah candle kanan yang harus bersih (tidak menyentuh wick) -- cukup c3 saja
 EXPIRE_CANDLES = 4   # level kadaluarsa kalau limit tak tersentuh dlm N candle H1 setelah TEST2
 
+def compute_rsi(close, period):
+    """RSI Wilder (smoothing alpha=1/period) dari array close."""
+    c = pd.Series(close)
+    delta = c.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = rsi.where(avg_loss != 0, 100.0)   # tanpa loss sama sekali -> RSI 100
+    return rsi.values
+
 def find_levels(df):
     """Deteksi level Support & Resistance dari candle H1 (basis body candle).
     TANPA syarat kiri lagi -- cukup c3 (candle tepat setelah c1,c2) yang
@@ -405,6 +425,7 @@ def detect_snr_events(df):
     n = len(df)
     WICK_EPS = 1e-9
     levels = find_levels(df)
+    rsi = compute_rsi(c, RSI_PERIOD)
     events = []
 
     for lv in levels:
@@ -457,6 +478,18 @@ def detect_snr_events(df):
         wick_total_t2 = (h[t2] - body_top) + (body_bottom - l[t2])
         if not (body_size_t2 > wick_total_t2 + WICK_EPS):
             continue   # body TEST2 tidak lebih besar dari total wick-nya sendiri -> level gugur
+
+        # FILTER RSI (RSI_PERIOD, default 5) pada candle TEST2 (nilai di close
+        # TEST2): RSI > RSI_LEVEL (default 51) -> setup Long (support) GAGAL,
+        # hanya Short yg boleh. RSI < RSI_LEVEL -> setup Short (resistance)
+        # GAGAL, hanya Long yg boleh. RSI NaN (data awal) -> gagal.
+        rsi_t2 = rsi[t2]
+        if np.isnan(rsi_t2):
+            continue
+        if ty == 'support' and rsi_t2 > RSI_LEVEL:
+            continue   # bullish tapi RSI di atas level -> gugur
+        if ty == 'resistance' and rsi_t2 < RSI_LEVEL:
+            continue   # bearish tapi RSI di bawah level -> gugur
 
         kind = 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE'
         direction = 'Long' if ty == 'support' else 'Short'
@@ -942,6 +975,7 @@ def _run():
         _log_msg(f"   Syarat: c2/c3/c4 (salah satu) wajib penyebab golden/death cross searah  "
                   f"Entry=LIMIT di ujung wick TEST1 (armed dlm radius {APPROACH_PCT*100:.1f}%, setelah TEST1+TEST2 engulfing, body TEST2>body TEST1, body TEST2>wick TEST2)  "
                   f"tanpa TEST3, limit langsung di wick TEST1 setelah TEST2 lolos  "
+                  f"Filter RSI{RSI_PERIOD} di TEST2: >{RSI_LEVEL:g} tolak Long, <{RSI_LEVEL:g} tolak Short  "
                   f"SL=adaptif di wick TEST2 (engulfing), min {SL_MIN_PCT*100:.2f}% dari entry  "
                   f"Trailing: aktif di "
                   f"{TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme")
@@ -1133,6 +1167,8 @@ def _render_html() -> bytes:
     dihitung) daripada body candle TEST1 DAN body candle TEST2 harus lebih BESAR daripada
     TOTAL WICK candle TEST2 itu sendiri (candle TEST2 harus "solid", body dominan). Tidak ada
     syarat arah candle terpisah. Kalau gagal salah satu syarat, level gugur (hanya dicoba 1x).
+    <br>• <b>FILTER RSI{RSI_PERIOD}</b> (candle TEST2): RSI &gt; {RSI_LEVEL:g} → Long gagal (hanya
+    Short boleh); RSI &lt; {RSI_LEVEL:g} → Short gagal (hanya Long boleh).
     <br>• <b>ENTRY</b>: LIMIT di UJUNG WICK candle TEST1 (Long → high candle TEST1, Short →
     low candle TEST1), dipasang langsung setelah TEST2 lolos. Limit baru RESMI ARMED begitu
     harga M5 masuk radius <b>{APPROACH_PCT*100:.1f}%</b> dari entry_price, lalu ditunggu sampai
