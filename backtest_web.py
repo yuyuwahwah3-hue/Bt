@@ -4,7 +4,7 @@ backtest_snr.py — Backtest strategi Support & Resistance + TEST1/TEST2 (engulf
 Level Support/Resistance dari 2 candle berlawanan arah (c1,c2), dikonfirmasi
 1 candle kanan bersih (c3). Setelah itu MENUNGGU harga menyentuh "patokan"
 (level itu sendiri), lalu cek candle berikutnya apakah ENGULFING. Kalau ya
--> ENTRY MARKET langsung saat candle TEST2 closed. Tiap level
+-> pasang LIMIT di ujung wick candle TEST2, tunggu tersentuh. Tiap level
 HANYA dicoba 1x (tidak ada re-entry).
 
 RINGKASAN STRATEGI
@@ -52,11 +52,13 @@ RINGKASAN STRATEGI
    Kalau gagal salah satu syarat di atas -> level GUGUR (hanya dicoba
    SEKALI, tidak dicari TEST1 berikutnya lagi).
 
-4) ENTRY -- MARKET langsung saat candle TEST2 closed lolos (tanpa limit),
-   harga entry = close candle TEST2. Kalau slot/margin/min order tidak
-   cukup saat itu, sinyal dilewati.
-   SL = ADAPTIF, di ujung wick candle TEST2 (Long -> low, Short -> high),
-   minimal SL_MIN_PCT (1%) dan MAKSIMAL SL_MAX_PCT (3%) dari entry.
+4) ENTRY -- LIMIT di UJUNG WICK candle TEST2 (Long -> low TEST2, Short ->
+   high TEST2), dipasang begitu TEST2 closed. Baru RESMI AKTIF (armed)
+   begitu harga masuk radius APPROACH_PCT (default 2%) dari entry_price,
+   lalu ditunggu sampai TERSENTUH. Kalau harga menjauh >2%, disarm (balik
+   waiting, tetap hidup). KADALUARSA: EXPIRE_CANDLES candle H1 setelah
+   TEST2 closed tanpa fill -> gugur.
+   SL = FIX SL_PCT (default 1%) dari entry (Long di bawah, Short di atas).
    TRAILING STOP: aktif di TRAIL_ACTIVATE_R, SL mengikuti TRAIL_STOP_R di
    belakang harga ekstrem (dipantau M5). Level MATI setelah 1x FILLED.
 
@@ -91,8 +93,8 @@ RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk 1% 
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
-SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', '0.01'))       # SL ADAPTIF: dipasang di wick candle TEST2 (engulfing), tapi jarak minimum 0.3% dari entry (floor kalau wick-nya kecil)
-SL_MAX_PCT       = float(os.environ.get('SL_MAX_PCT', '0.03'))       # SL maksimal 3% dari entry: kalau wick TEST2 lebih jauh dari ini, SL dipersempit (cap) ke 3%
+SL_PCT           = float(os.environ.get('SL_PCT', '0.01'))           # SL FIX 1% dari entry (Long: entry*(1-1%), Short: entry*(1+1%))
+APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.02'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
 TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 3R
 TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
 
@@ -363,7 +365,7 @@ def find_levels(df):
 
 def detect_snr_events(df):
     """Deteksi level Support & Resistance, lalu cari TEST1+TEST2 (engulfing)
-    utk tiap level yang terbentuk. Entry = MARKET saat TEST2 closed.
+    utk tiap level yang terbentuk. Entry = LIMIT di ujung wick candle TEST2.
 
     Urutan:
     1) Level terbentuk (find_levels): c1+c2 (2 candle berlawanan arah), c3
@@ -382,86 +384,13 @@ def detect_snr_events(df):
        TIDAK ADA syarat arah candle TEST2 secara terpisah. Kalau gagal
        engulfing -> level GUGUR (hanya dicoba SEKALI, tidak dicari TEST1
        berikutnya lagi).
-    4) ENTRY: MARKET langsung saat candle TEST2 closed (harga = close TEST2).
-       SL di ujung wick TEST2, jarak di-clamp [SL_MIN_PCT, SL_MAX_PCT].
-
-    Return list dict: {'type', 'level', 'patokan', 'c1', 'c2', 'c_right'}."""
-    o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
-    n = len(df)
-    ema_fast = pd.Series(c).ewm(span=EMA_FAST, adjust=False).mean().values
-    ema_slow = pd.Series(c).ewm(span=EMA_SLOW, adjust=False).mean().values
-
-    def golden_cross_at(j):   # cross TEPAT di index j (dibanding j-1)
-        return ema_fast[j - 1] <= ema_slow[j - 1] and ema_fast[j] > ema_slow[j]
-
-    def death_cross_at(j):
-        return ema_fast[j - 1] >= ema_slow[j - 1] and ema_fast[j] < ema_slow[j]
-
-    levels = []
-    for i in range(0, n - 3):   # perlu c1,c2,c3,c4 (i..i+3) semua ada di dalam data
-        golden_cross_c2_c4 = any(golden_cross_at(j) for j in (i + 1, i + 2, i + 3))
-        death_cross_c2_c4  = any(death_cross_at(j) for j in (i + 1, i + 2, i + 3))
-        if c[i] < o[i] and c[i + 1] > o[i + 1]:          # bearish lalu bullish -> support
-            S = c[i]
-            right_ok = all(l[i + 2 + k] > S + 1e-9 for k in range(N_RIGHT))
-            if right_ok and golden_cross_c2_c4:
-                levels.append({'type': 'support', 'level': S, 'patokan': S,
-                                'c1': i, 'c2': i + 1, 'c_right': [i + 2 + k for k in range(N_RIGHT)]})
-        if c[i] > o[i] and c[i + 1] < o[i + 1]:          # bullish lalu bearish -> resistance
-            R = c[i]
-            right_ok = all(h[i + 2 + k] < R - 1e-9 for k in range(N_RIGHT))
-            if right_ok and death_cross_c2_c4:
-                levels.append({'type': 'resistance', 'level': R, 'patokan': R,
-                                'c1': i, 'c2': i + 1, 'c_right': [i + 2 + k for k in range(N_RIGHT)]})
-    return levels
-
-
-# ============================================================
-# DETEKSI SBR & RBS (Support/Resistance Break & Retest)
-# ============================================================
-# SBR = Support jadi Resistance (arah entry: Short)
-# RBS = Resistance jadi Support (arah entry: Long)
-#
-# Untuk tiap level (mulai scan dari candle c3), cari SEKALI kejadian pertama:
-#   TEST   -> minimal 1 candle wick menyentuh level tapi close masih aman
-#   BREAK  -> candle pertama SETELAH test yang close-nya menembus level
-#   KONFIRM-> candle TEPAT SETELAH break, wick-nya TIDAK balik menyentuh level
-#
-# Catatan urutan: TEST harus terjadi SEBELUM BREAK (candle test dan candle
-# break boleh saja candle yang sama SELAMA candle itu masih "test" dulu di
-# baca -- tapi karena test butuh close aman & break butuh close tembus, satu
-# candle tidak bisa jadi TEST dan BREAK sekaligus, jadi otomatis break selalu
-# candle yang berbeda dan setelah test pertama).
-
-def detect_snr_events(df):
-    """Deteksi level Support & Resistance, lalu cari TEST1+TEST2 (engulfing)
-    utk tiap level yang terbentuk. Entry = MARKET saat TEST2 closed.
-
-    Urutan:
-    1) Level terbentuk (find_levels): c1+c2 (2 candle berlawanan arah), c3
-       bersih (wick tidak menyentuh level). 'patokan' = LEVEL itu sendiri
-       (ujung body c1, sama persis dengan 'level').
-    2) TEST1: mulai scan dari candle SETELAH c3, cari candle PERTAMA yang
-       wick/body-nya MENYENTUH ATAU MELEBIHI patokan (support: low <=
-       patokan; resistance: high >= patokan) -- tersentuh persis di harga
-       patokan juga VALID, tidak wajib menembus. TIDAK ADA syarat arah
-       candle.
-    3) TEST2: candle TEPAT SETELAH candle TEST1 -- harus ENGULFING SEARAH:
-       Support (Long): ujung body candle TEST2 (max(open,close)) harus
-       LEBIH TINGGI dari ujung ATAS wick candle TEST1 (high candle TEST1).
-       Resistance (Short): ujung body candle TEST2 (min(open,close)) harus
-       LEBIH RENDAH dari ujung BAWAH wick candle TEST1 (low candle TEST1).
-       TIDAK ADA syarat arah candle TEST2 secara terpisah. Kalau gagal
-       engulfing -> level GUGUR (hanya dicoba SEKALI, tidak dicari TEST1
-       berikutnya lagi).
-    4) ENTRY: LIMIT, di harga UJUNG WICK candle TEST1: Long -> high candle
-       TEST1 (ujung atas). Short -> low candle TEST1 (ujung bawah). Limit
-       baru RESMI ARMED begitu harga M5 masuk radius APPROACH_PCT (default
-       2%) dari entry_price, lalu ditunggu sampai TERSENTUH (fill).
+    4) ENTRY: LIMIT di UJUNG WICK candle TEST2: Long -> low TEST2, Short ->
+       high TEST2, dipasang begitu TEST2 closed. Limit baru RESMI ARMED
+       begitu harga M5 masuk radius APPROACH_PCT (default 2%) dari
+       entry_price, lalu ditunggu sampai TERSENTUH (fill). SL = SL_PCT (1%)
+       dari entry.
     5) KADALUARSA: kalau dalam EXPIRE_CANDLES (default 4) candle H1 SETELAH
-       TEST2, limit tidak
-       PERNAH tersentuh (baik masih waiting maupun sudah armed) -> setup
-       GUGUR (dibuang, tidak ditunggu lagi).
+       TEST2 closed limit tidak PERNAH tersentuh -> setup GUGUR.
 
     Return list dict:
     {'kind': 'SNR_SUPPORT'/'SNR_RESISTANCE', 'type': support/resistance,
@@ -529,27 +458,19 @@ def detect_snr_events(df):
 
         kind = 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE'
         direction = 'Long' if ty == 'support' else 'Short'
-        # Entry MARKET langsung saat candle TEST2 CLOSED (tanpa limit): harga
-        # entry = close candle TEST2 (= open M5 pertama setelah TEST2 closed).
-        entry_price = float(c[t2])
+        # Entry LIMIT di ujung wick candle TEST2: Long -> low TEST2 (ujung
+        # bawah), Short -> high TEST2 (ujung atas). Dipasang begitu candle
+        # TEST2 CLOSED. SL = SL_PCT (1%) dari entry: Long -> di bawah entry,
+        # Short -> di atas entry.
+        entry_price = float(l[t2]) if direction == 'Long' else float(h[t2])
         entry_price_t3 = None
         test3_ts = None
-        # SL ADAPTIF: di ujung wick candle TEST2 (Long -> low t2, Short -> high
-        # t2). Jarak SL di-CLAMP ke [SL_MIN_PCT, SL_MAX_PCT] dari entry: kalau
-        # wick terlalu pendek diperlebar ke minimum, kalau terlalu jauh
-        # dipersempit ke maksimum (default 3%).
-        min_sl_dist = entry_price * SL_MIN_PCT
-        max_sl_dist = entry_price * SL_MAX_PCT
-        if direction == 'Long':
-            sl_dist = entry_price - float(l[t2])
-        else:
-            sl_dist = float(h[t2]) - entry_price
-        sl_dist = min(max(sl_dist, min_sl_dist), max_sl_dist)
-        sl_price = entry_price - sl_dist if direction == 'Long' else entry_price + sl_dist
-        # ready_ts = saat candle TEST2 CLOSED (open + 1 jam - 1ms) -> entry
-        # market di candle M5 pertama setelahnya (tanpa lookahead).
+        sl_price = entry_price * (1 - SL_PCT) if direction == 'Long' else entry_price * (1 + SL_PCT)
+        # ready_ts = saat candle TEST2 CLOSED (open + 1 jam - 1ms) -> limit
+        # baru dipasang setelahnya (tanpa lookahead). expire_ts dari WAKTU
+        # (ready_ts + EXPIRE_CANDLES jam H1).
         ready_ts = int(ts[t2]) + 3600 * 1000 - 1
-        expire_ts = None
+        expire_ts = ready_ts + EXPIRE_CANDLES * 3600 * 1000
         events.append({
             'kind': kind, 'type': ty, 'level': level, 'patokan': patokan,
             'direction': direction,
@@ -621,9 +542,11 @@ def prepare_coin(symbol, df):
 # ============================================================
 #
 # Tiap event dari detect_all_events() SUDAH final (test1+test2/engulfing
-# sudah lolos di tahap deteksi). Begitu waktu (M5) sampai di ready_ts event
-# itu (TEST2 closed) -> langsung open_trade (ENTRY MARKET). Kalau slot/margin/
-# min order tidak cukup saat itu, sinyal dilewati.
+# sudah lolos di tahap deteksi, entry_price = ujung wick candle TEST2) --
+# begitu waktu (M5) sampai di ready_ts event itu (TEST2 closed), limit order
+# "dipasang" (GTC), lalu dipantau tiap candle M5 sampai TERSENTUH baru
+# open_trade. Kalau slot/margin/min order tidak cukup PAS saat tersentuh,
+# limit TETAP GTC (tidak batal), dicoba lagi kalau tersentuh lagi nanti.
 
 def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
     balance = INITIAL_BALANCE
@@ -641,9 +564,12 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
     positions_by_symbol = {}   # symbol -> set(keys)
 
     # pending_activation: event yg ready_ts-nya BELUM lewat, urut asc per simbol.
-    # Begitu ready_ts lewat -> entry market langsung.
+    # Begitu ready_ts lewat -> limit MASUK STATUS 'waiting' (live_levels_by_symbol),
+    # dipantau tiap candle M5: harga masuk radius APPROACH_PCT -> ARMED, lalu ditunggu
+    # sampai TERSENTUH (open_trade).
     pending_activation = {}
     live_levels_by_symbol = {symbol: [] for symbol in coins}
+    # level_state: (symbol, idx) -> {'status': 'waiting'/'armed', 'entry_price', 'expire_ts'}
     level_state = {}
     for symbol, cp in coins.items():
         pending_activation[symbol] = sorted(
@@ -653,7 +579,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         nonlocal balance, total_margin_used
         direction = ev['direction']
         sl = ev['sl_price']
-        dist = abs(entry_price - sl)   # = 1R (adaptif, wick TEST2, floor SL_MIN_PCT)
+        dist = abs(entry_price - sl)   # = 1R (SL fix SL_PCT dari entry)
 
         risk_amount = balance * RISK_PCT
         raw_qty = risk_amount / dist if dist > 0 else 0
@@ -746,7 +672,44 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
                     if hi >= pos['sl'] - 1e-12:
                         close_trade(key, pos['sl'], 'SL' if not pos['trail_active'] else 'TRAIL', now_ts)
 
-    nonlocal_blocks = {'slot': 0, 'margin': 0, 'min_order': 0, 'invalid_sl': 0, 'expired': 0}  # 'expired' tidak dipakai lagi (tanpa limit)
+        # 2) limit live simbol ini: waiting (belum dlm radius 2%) -> armed
+        #    (sudah dlm radius 2%, limit resmi terpasang) -> tersentuh (fill).
+        #    Entry = wick TEST2 (tempat limit dipasang). KADALUARSA: now_ts >=
+        #    expire_ts dan belum tersentuh -> setup gugur, dibuang.
+        cp = coins[symbol]
+        live_idxs = live_levels_by_symbol.get(symbol)
+        if live_idxs:
+            still_live = []
+            for idx in live_idxs:
+                ev = cp['events'][idx]
+                st = level_state[(symbol, idx)]
+
+                expire_ts = st['expire_ts']
+                if expire_ts is not None and now_ts >= expire_ts:
+                    nonlocal_blocks['expired'] += 1
+                    continue   # kadaluarsa -> dibuang, tidak pernah dicoba lagi
+                entry_price = st['entry_price']
+                dist_pct = abs(close_p - entry_price) / entry_price
+                touched = (lo <= entry_price <= hi)
+                if st['status'] == 'waiting':
+                    if dist_pct <= APPROACH_PCT:
+                        st['status'] = 'armed'
+                    still_live.append(idx)
+                else:   # armed
+                    if touched:
+                        opened_key, block_reason = open_trade(symbol, ev, entry_price, now_ts)
+                        if opened_key is None:
+                            nonlocal_blocks[block_reason] += 1
+                            # gagal dibuka (slot/margin/min_order) -> limit tetap
+                            # GTC (armed), coba lagi kalau tersentuh lagi nanti
+                            still_live.append(idx)
+                    else:
+                        if dist_pct > APPROACH_PCT:
+                            st['status'] = 'waiting'   # menjauh lagi -> disarm
+                        still_live.append(idx)
+            live_levels_by_symbol[symbol] = still_live
+
+    nonlocal_blocks = {'slot': 0, 'margin': 0, 'min_order': 0, 'invalid_sl': 0, 'expired': 0}
 
     # ── TIMELINE EFISIEN via K-WAY MERGE (pointer index, bukan searchsorted) ──
     # Tiap simbol punya pointer int ke posisi candle M5 berikutnya yg BELUM
@@ -789,17 +752,18 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         if i >= m5_len[symbol] or m5_ts_arr[symbol][i] != now_ts:
             continue   # stale entry (seharusnya tidak terjadi, safety check)
 
-        # begitu waktu (M5) sudah lewat ready_ts sebuah event (TEST2 closed) -> entry market
+        # begitu waktu (M5) sudah lewat ready_ts sebuah event (TEST2 closed) -> limit mulai dipantau
+        # (status 'waiting' -- belum dlm radius APPROACH_PCT dari entry_price)
         plist = pending_activation.get(symbol)
         if plist:
             while plist and plist[0][0] < now_ts:
                 _, idx = plist.pop(0)
                 ev = coins[symbol]['events'][idx]
-                # ENTRY MARKET langsung (TEST2 sudah closed). Kalau slot/margin/min
-                # order tidak cukup saat ini -> sinyal dilewati (tidak ditunggu).
-                opened_key, block_reason = open_trade(symbol, ev, ev['entry_price'], now_ts)
-                if opened_key is None:
-                    nonlocal_blocks[block_reason] += 1
+                level_state[(symbol, idx)] = {
+                    'status': 'waiting', 'entry_price': ev['entry_price'],
+                    'expire_ts': ev['expire_ts'],
+                }
+                live_levels_by_symbol[symbol].append(idx)
 
         process_symbol_tick(symbol, i)
 
@@ -962,8 +926,8 @@ def _run():
     try:
         _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + EMA{EMA_FAST}/{EMA_SLOW} cross) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
         _log_msg(f"   Syarat: c2/c3/c4 (salah satu) wajib penyebab golden/death cross searah  "
-                  f"Entry=MARKET saat TEST2 (engulfing, body TEST2>body TEST1, body TEST2>wick TEST2) closed  "
-                  f"SL=adaptif di wick TEST2, min {SL_MIN_PCT*100:.2f}% & maks {SL_MAX_PCT*100:.2f}% dari entry  "
+                  f"Entry=LIMIT di ujung wick TEST2 (armed dlm radius {APPROACH_PCT*100:.1f}%, setelah TEST1+TEST2 engulfing, body TEST2>body TEST1, body TEST2>wick TEST2)  "
+                  f"SL=fix {SL_PCT*100:.2f}% dari entry  "
                   f"Trailing: aktif di "
                   f"{TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme")
 
@@ -1154,17 +1118,22 @@ def _render_html() -> bytes:
     dihitung) daripada body candle TEST1 DAN body candle TEST2 harus lebih BESAR daripada
     TOTAL WICK candle TEST2 itu sendiri (candle TEST2 harus "solid", body dominan). Tidak ada
     syarat arah candle terpisah. Kalau gagal salah satu syarat, level gugur (hanya dicoba 1x).
-    <br>• <b>ENTRY</b>: <b>MARKET</b> langsung begitu candle TEST2 closed dan lolos (harga entry =
-    close candle TEST2, tanpa limit). Kalau slot/margin/min order tidak cukup, sinyal dilewati.
+    <br>• <b>ENTRY</b>: LIMIT di UJUNG WICK candle TEST2 (Long → low candle TEST2, Short →
+    high candle TEST2), dipasang begitu TEST2 closed. Limit baru RESMI ARMED begitu harga M5
+    masuk radius <b>{APPROACH_PCT*100:.1f}%</b> dari entry_price, lalu ditunggu sampai TERSENTUH
+    (fill). Kalau menjauh lagi &gt;{APPROACH_PCT*100:.1f}% sebelum tersentuh, limit disarm
+    (balik menunggu, tetap hidup).
+    <br>• <b>KADALUARSA</b>: kalau dalam <b>{EXPIRE_CANDLES}</b> candle H1 setelah TEST2 closed
+    limit tidak PERNAH tersentuh → setup GUGUR, dibuang permanen.
     Tiap level HANYA dipakai 1x (test1+test2 cuma dicoba sekali).
-    SL adaptif di ujung wick candle TEST2, minimum
-    <b>{SL_MIN_PCT*100:.2f}%</b> dan maksimum <b>{SL_MAX_PCT*100:.2f}%</b> dari entry (=1R). <b>Trailing stop</b>: aktif begitu profit
+    SL <b>fix {SL_PCT*100:.2f}%</b> dari entry (=1R). <b>Trailing stop</b>: aktif begitu profit
     capai <b>{TRAIL_ACTIVATE_R:.1f}R</b>, lalu SL mengikuti <b>{TRAIL_STOP_R:.1f}R</b> di
     belakang harga tertinggi/terendah yang pernah dicapai (dipantau M5). Level MATI setelah
     1x terisi (menang/kalah).
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
     Sinyal terblokir — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
-    min order: {cr.get('blocked_by_min_order',0)}.
+    min order: {cr.get('blocked_by_min_order',0)}. Kadaluarsa (limit tak tersentuh
+    {EXPIRE_CANDLES} candle): {cr.get('expired_count',0)}.
     <br>Unduh semua trade: <a href="/trades.csv">/trades.csv</a> &nbsp;|&nbsp;
     Log mentah: <a href="/logs">/logs</a>
   </div>
