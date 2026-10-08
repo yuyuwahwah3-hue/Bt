@@ -54,7 +54,8 @@ RINGKASAN STRATEGI
 
 4) TEST3 -- candle TEPAT SETELAH TEST2. LULUS kalau candle TEST3 TIDAK
    menyentuh ujung wick candle TEST1 (Long: low TEST3 > high TEST1; Short:
-   high TEST3 < low TEST1). Kalau menyentuh -> level GUGUR. Limit TIDAK
+   high TEST3 < low TEST1) DAN candle TEST3 harus SEARAH (Long: close >
+   open / bullish; Short: close < open / bearish). Kalau gagal -> level GUGUR. Limit TIDAK
    dipasang setelah TEST2, melainkan baru setelah TEST3 lulus.
 
 5) ENTRY -- LIMIT, di UJUNG WICK candle TEST3 (Long -> low TEST3, Short ->
@@ -485,10 +486,12 @@ def detect_snr_events(df):
         t3 = t2 + 1
         if t3 >= n:
             continue
+        # Syarat tambahan: candle TEST3 harus SEARAH -- Long: close[t3] >
+        # open[t3] (bullish); Short: close[t3] < open[t3] (bearish).
         if direction == 'Long':
-            test3_ok = l[t3] > h[test1_i] + WICK_EPS
+            test3_ok = (l[t3] > h[test1_i] + WICK_EPS) and (c[t3] > o[t3] + WICK_EPS)
         else:
-            test3_ok = h[t3] < l[test1_i] - WICK_EPS
+            test3_ok = (h[t3] < l[test1_i] - WICK_EPS) and (c[t3] < o[t3] - WICK_EPS)
         if not test3_ok:
             continue   # TEST3 menyentuh ujung TEST1 -> level gugur
         entry_price = float(l[t3]) if direction == 'Long' else float(h[t3])
@@ -1165,7 +1168,8 @@ def _render_html() -> bytes:
     syarat arah candle terpisah. Kalau gagal salah satu syarat, level gugur (hanya dicoba 1x).
     <br>• <b>TEST3</b>: candle TEPAT SETELAH TEST2 -- LULUS kalau candle TEST3 TIDAK menyentuh
     ujung wick candle TEST1 (Long: low TEST3 &gt; high TEST1. Short: high TEST3 &lt; low TEST1).
-    Kalau menyentuh, level gugur. Limit TIDAK dipasang setelah TEST2, baru setelah TEST3 lulus.
+    DAN candle TEST3 harus searah (Long: close &gt; open, Short: close &lt; open).
+    Kalau gagal salah satu, level gugur. Limit TIDAK dipasang setelah TEST2, baru setelah TEST3 lulus.
     <br>• <b>ENTRY</b>: LIMIT di UJUNG WICK candle TEST3 (Long → low candle TEST3, Short →
     high candle TEST3), dipasang begitu candle TEST3 closed. Limit baru RESMI ARMED begitu harga
     M5 masuk radius <b>{APPROACH_PCT*100:.1f}%</b> dari entry_price, lalu ditunggu sampai
