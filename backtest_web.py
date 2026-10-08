@@ -52,23 +52,21 @@ RINGKASAN STRATEGI
    Kalau gagal salah satu syarat di atas -> level GUGUR (hanya dicoba
    SEKALI, tidak dicari TEST1 berikutnya lagi).
 
-4) ENTRY -- LIMIT, di UJUNG WICK candle TEST1: Long -> high candle TEST1
-   (ujung atas). Short -> low candle TEST1 (ujung bawah). Limit ini baru
-   RESMI AKTIF (armed) begitu harga sudah masuk radius APPROACH_PCT (default
-   2%) dari entry_price -- sebelum itu levelnya cuma "menunggu" (waiting),
-   belum benar2 terpasang. Setelah armed, ditunggu sampai TERSENTUH (fill).
-   Kalau harga menjauh lagi >2% sebelum tersentuh, limit disarm (balik ke
-   waiting, tetap hidup, bisa armed lagi kalau mendekat lagi). GTC, tidak
-   ada batas waktu.
-   SL = ADAPTIF, dipasang di ujung wick candle TEST2 (candle engulfing):
-   Long -> low candle TEST2, Short -> high candle TEST2. Kalau jarak yg
-   dihasilkan < SL_MIN_PCT (default 0.3%) dari entry, diperbesar (floor)
-   jadi SL_MIN_PCT supaya tidak kena noise/wick tipis.
-   TRAILING STOP: begitu profit capai TRAIL_ACTIVATE_R (default 3R), trailing
-   aktif -- SL lalu mengikuti TRAIL_STOP_R (default 1R) di belakang harga
-   tertinggi/terendah yang pernah dicapai (dipantau M5), SL cuma boleh
-   bergerak menguntungkan, tak pernah mundur.
-   Level MATI (tidak dipakai lagi) setelah 1x FILLED (menang ataupun kalah).
+4) TEST3 -- candle TEPAT SETELAH TEST2. LULUS kalau candle TEST3 TIDAK
+   menyentuh ujung wick candle TEST1 (Long: low TEST3 > high TEST1; Short:
+   high TEST3 < low TEST1). Kalau menyentuh -> level GUGUR. Limit TIDAK
+   dipasang setelah TEST2, melainkan baru setelah TEST3 lulus.
+
+5) ENTRY -- LIMIT, di UJUNG WICK candle TEST3 (Long -> low TEST3, Short ->
+   high TEST3), dipasang begitu candle TEST3 closed. Baru RESMI AKTIF
+   (armed) begitu harga masuk radius APPROACH_PCT (default 2%) dari
+   entry_price, lalu ditunggu sampai TERSENTUH. Kalau harga menjauh >2%,
+   disarm (balik waiting, tetap hidup). KADALUARSA: EXPIRE_CANDLES candle
+   H1 setelah TEST3 closed tanpa fill -> gugur.
+   SL = ADAPTIF, di ujung wick candle TEST2 (Long -> low, Short -> high),
+   minimal SL_MIN_PCT dari entry.
+   TRAILING STOP: aktif di TRAIL_ACTIVATE_R, SL mengikuti TRAIL_STOP_R di
+   belakang harga ekstrem (dipantau M5). Level MATI setelah 1x FILLED.
 
 Deploy ke Railway:
   Start command -> python backtest_snr.py
@@ -105,7 +103,6 @@ SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', '0.01'))       # SL ADAPTI
 APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.02'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
 TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 3R
 TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
-ENABLE_TEST3     = os.environ.get('ENABLE_TEST3', 'true').lower() == 'true'   # AKTIF (default): entry pindah ke wick TEST3 kalau TEST1 blm fill 1 candle H1 setelah TEST2
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
@@ -141,12 +138,15 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 # Hasil backtest 1 tahun (S&R + EMA cross c2-c4 + TEST1/TEST2 engulfing) --
 # hanya koin dengan WIN RATE >= 50% yang dipakai (bukan filter ROI kali ini).
 SYMBOLS = [
-      'STORJUSDT', 'BERAUSDT', 'LABUSDT', 'ESPORTSUSDT', 'ICPUSDT', 
-    'ENAUSDT', 'POPCATUSDT', 'POWRUSDT', '1000BONKUSDT', 'PYTHUSDT', 
-    'USUALUSDT', 'PLUMEUSDT', 'CRVUSDT', 'DYDXUSDT', 'FARTCOINUSDT', 
-    'STRKUSDT', 'IOUSDT', 'HBARUSDT', 'WIFUSDT', 'LRCUSDT', 
-    'ROSEUSDT', 'PENDLEUSDT', 'HUSDT', 'ADAUSDT', 'BLURUSDT'
-
+    'PENDLEUSDT', 'PYTHUSDT', 'BLURUSDT', '1000BONKUSDT', 'WUSDT',
+    'USUALUSDT', 'ETHFIUSDT', 'LABUSDT', 'IOTAUSDT', '1000FLOKIUSDT',
+    'HBARUSDT', 'PLUMEUSDT', 'BERAUSDT', 'MASKUSDT', 'ESPORTSUSDT',
+    'IMXUSDT', 'CRVUSDT', 'ACHUSDT', 'FARTCOINUSDT', 'AEVOUSDT',
+    'ICPUSDT', 'ENAUSDT', 'ADAUSDT', 'WIFUSDT', 'DYDXUSDT',
+    'BATUSDT', 'LRCUSDT', 'IOUSDT', 'BOMEUSDT', 'OPUSDT',
+    'POPCATUSDT', 'WOOUSDT', 'STORJUSDT', 'ROSEUSDT', 'POWRUSDT',
+    'JUPUSDT', 'HUSDT', 'STRKUSDT', 'IOTXUSDT', 'MEWUSDT',
+    'VIRTUALUSDT', 'POLUSDT', 'CKBUSDT', 'ASTRUSDT'
 ]
 
 
@@ -473,23 +473,27 @@ def detect_snr_events(df):
 
         kind = 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE'
         direction = 'Long' if ty == 'support' else 'Short'
-        # Entry LIMIT di ujung wick candle TEST1: Long -> high (ujung atas),
-        # Short -> low (ujung bawah).
-        entry_price = float(h[test1_i]) if direction == 'Long' else float(l[test1_i])
-        # TEST3: candle TEPAT SETELAH TEST2 (t3 = t2+1). Kalau limit di
-        # TEST1 belum fill sampai candle TEST3 closed, entry DIPINDAH ke
-        # ujung wick candle TEST3 (Long -> low, Short -> high -- arah
-        # sebaliknya dari TEST1, karena TEST3 dianggap titik masuk lanjutan
-        # yg lebih dekat/konservatif ke arah profit). Kalau data belum
-        # sampai candle TEST3 (ujung histori), TEST3 tidak bisa ditentukan
-        # -> entry TETAP di TEST1 selamanya (sampai expire spt biasa).
+        # TEST3: candle TEPAT SETELAH TEST2 (t3 = t2+1). TEST3 LULUS kalau
+        # candle TEST3 TIDAK menyentuh ujung wick candle TEST1:
+        #   Long  -> seluruh candle TEST3 di atas high TEST1 (low[t3] > high[test1])
+        #   Short -> seluruh candle TEST3 di bawah low TEST1 (high[t3] < low[test1])
+        # Kalau menyentuh -> level GUGUR. Kalau data belum sampai candle
+        # TEST3 (ujung histori) -> belum bisa dinilai, level dilewati.
+        # Limit TIDAK dipasang setelah TEST2, melainkan baru setelah TEST3
+        # lulus (dan candle TEST3 closed), di ujung wick candle TEST3:
+        # Long -> low TEST3, Short -> high TEST3.
         t3 = t2 + 1
-        if t3 < n:
-            entry_price_t3 = float(l[t3]) if direction == 'Long' else float(h[t3])
-            test3_ts = int(ts[t3])
+        if t3 >= n:
+            continue
+        if direction == 'Long':
+            test3_ok = l[t3] > h[test1_i] + WICK_EPS
         else:
-            entry_price_t3 = None
-            test3_ts = None
+            test3_ok = h[t3] < l[test1_i] - WICK_EPS
+        if not test3_ok:
+            continue   # TEST3 menyentuh ujung TEST1 -> level gugur
+        entry_price = float(l[t3]) if direction == 'Long' else float(h[t3])
+        entry_price_t3 = None   # tidak dipakai lagi (entry langsung di wick TEST3)
+        test3_ts = int(ts[t3])
         # SL ADAPTIF (menyesuaikan market, bukan fix %): dipasang di ujung
         # wick candle TEST2 (candle engulfing) -- Long -> low candle t2
         # (ujung bawah), Short -> high candle t2 (ujung atas). Kalau jarak
@@ -503,19 +507,16 @@ def detect_snr_events(df):
             sl_raw = float(h[t2])
             min_sl_dist = entry_price * SL_MIN_PCT
             sl_price = max(sl_raw, entry_price + min_sl_dist)   # makin jauh ke atas = makin lebar
-        # expire_ts dihitung dari WAKTU (ts candle TEST2 + EXPIRE_CANDLES jam
-        # H1 dalam ms), BUKAN dari index array data (ts[t2+N]). Kalau dari
-        # index, event yg TEST2-nya ada di beberapa candle terakhir dari
-        # rentang backtest bisa dapat expire_ts None -> tidak pernah dicek
-        # expire, bikin statistik expired_count meleset di ujung periode.
-        # Catatan: begitu entry pindah ke TEST3, expire_ts DIHITUNG ULANG
-        # dari test3_ts (bukan dari sini lagi) -- lihat run_combined_backtest.
+        # ready_ts = saat candle TEST3 CLOSED (open + 1 jam - 1ms) -- limit
+        # baru dipasang setelah TEST3 selesai terbentuk (tanpa lookahead).
+        # expire_ts dihitung dari WAKTU (ready_ts + EXPIRE_CANDLES jam H1).
         H1_MS = 3600 * 1000
-        expire_ts = int(ts[t2]) + EXPIRE_CANDLES * H1_MS
+        ready_ts = int(ts[t3]) + H1_MS - 1
+        expire_ts = ready_ts + EXPIRE_CANDLES * H1_MS
         events.append({
             'kind': kind, 'type': ty, 'level': level, 'patokan': patokan,
             'direction': direction,
-            'entry_price': entry_price, 'sl_price': sl_price, 'ready_ts': int(ts[t2]),
+            'entry_price': entry_price, 'sl_price': sl_price, 'ready_ts': ready_ts,
             'entry_price_t3': entry_price_t3, 'test3_ts': test3_ts,
             'test1_ts': int(ts[test1_i]),
             'confirm_ts': int(ts[last_right_i]),
@@ -612,8 +613,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
     pending_activation = {}
     live_levels_by_symbol = {symbol: [] for symbol in coins}
     # level_state: (symbol, idx) -> {'status': 'waiting'/'armed', 'entry_price',
-    # 'expire_ts', 'used_t3'}. entry_price/expire_ts MUTABLE per-level -- mulai
-    # dari TEST1, dipindah ke TEST3 kalau 1 candle H1 setelah TEST2 belum fill.
+    # 'expire_ts', 'used_t3'}. entry_price = wick TEST3 (lihat detect_snr_events).
     level_state = {}
     for symbol, cp in coins.items():
         pending_activation[symbol] = sorted(
@@ -718,15 +718,8 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
 
         # 2) limit live simbol ini: waiting (belum dlm radius 2%) -> armed
         #    (sudah dlm radius 2%, limit resmi terpasang) -> tersentuh (fill).
-        #    TEST3: kalau limit TEST1 belum fill sampai 1 candle H1 SETELAH
-        #    TEST2 closed (now_ts >= test3_ts), entry DIPINDAH ke ujung wick
-        #    candle TEST3 (Long->low, Short->high -- kebalikan arah TEST1),
-        #    status di-reset ke 'waiting' (perlu re-armed sesuai radius lagi),
-        #    dan KADALUARSA mulai dihitung ulang dari test3_ts (bukan test2_ts
-        #    lagi). Kalau data belum sampai candle TEST3, entry tetap di TEST1.
-        #    KADALUARSA: kalau now_ts >= expire_ts (relatif thd TEST1 atau
-        #    TEST3, mana yg sedang aktif) dan belum pernah tersentuh -> setup
-        #    gugur, dibuang.
+        #    Entry = wick TEST3 (sudah lulus TEST3). KADALUARSA: now_ts >=
+        #    expire_ts dan belum tersentuh -> setup gugur, dibuang.
         cp = coins[symbol]
         live_idxs = live_levels_by_symbol.get(symbol)
         if live_idxs:
@@ -734,24 +727,6 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             for idx in live_idxs:
                 ev = cp['events'][idx]
                 st = level_state[(symbol, idx)]
-
-                if (ENABLE_TEST3 and not st['used_t3'] and ev.get('entry_price_t3') is not None
-                        and now_ts >= ev['test3_ts']):
-                    st['used_t3'] = True
-                    t3_price = ev['entry_price_t3']
-                    sl_price = ev['sl_price']
-                    # Guard: TEST3 arahnya kebalikan dari TEST1, jadi bisa
-                    # saja wick TEST3 melewati SL (candle TEST2) -> entry
-                    # jadi di sisi SALAH dari SL (mis. Long tapi entry <=
-                    # SL). Kalau begitu, TEST3 dianggap TIDAK VALID -> tetap
-                    # pakai entry TEST1, biarkan expire normal (tidak
-                    # diperpanjang).
-                    t3_valid = ((t3_price > sl_price) if ev['direction'] == 'Long'
-                                else (t3_price < sl_price))
-                    if t3_valid:
-                        st['entry_price'] = t3_price
-                        st['expire_ts'] = ev['test3_ts'] + EXPIRE_CANDLES * 3600 * 1000
-                        st['status'] = 'waiting'   # entry baru -> perlu re-armed dari radius APPROACH_PCT lagi
 
                 expire_ts = st['expire_ts']
                 if expire_ts is not None and now_ts >= expire_ts:
@@ -996,7 +971,7 @@ def _run():
         _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + EMA{EMA_FAST}/{EMA_SLOW} cross) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
         _log_msg(f"   Syarat: c2/c3/c4 (salah satu) wajib penyebab golden/death cross searah  "
                   f"Entry=LIMIT di ujung wick TEST1 (armed dlm radius {APPROACH_PCT*100:.1f}%, setelah TEST1+TEST2 engulfing, body TEST2>body TEST1, body TEST2>wick TEST2)  "
-                  f"TEST3 {'AKTIF -- pindah ke wick TEST3 kalau blm fill 1 candle H1 stlh TEST2' if ENABLE_TEST3 else 'NONAKTIF (entry tetap TEST1 sampai expire)'}  "
+                  f"TEST3 = syarat lulus (candle TEST3 tidak menyentuh ujung wick TEST1), limit dipasang di wick TEST3  "
                   f"SL=adaptif di wick TEST2 (engulfing), min {SL_MIN_PCT*100:.2f}% dari entry  "
                   f"Trailing: aktif di "
                   f"{TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme")
@@ -1188,22 +1163,18 @@ def _render_html() -> bytes:
     dihitung) daripada body candle TEST1 DAN body candle TEST2 harus lebih BESAR daripada
     TOTAL WICK candle TEST2 itu sendiri (candle TEST2 harus "solid", body dominan). Tidak ada
     syarat arah candle terpisah. Kalau gagal salah satu syarat, level gugur (hanya dicoba 1x).
-    <br>• <b>ENTRY</b>: LIMIT di UJUNG WICK candle TEST1 (Long → high candle TEST1, Short →
-    low candle TEST1). Limit baru RESMI ARMED begitu harga M5 masuk radius
-    <b>{APPROACH_PCT*100:.1f}%</b> dari entry_price, lalu ditunggu sampai TERSENTUH (fill).
-    Kalau menjauh lagi &gt;{APPROACH_PCT*100:.1f}% sebelum tersentuh, limit disarm (balik
-    menunggu, tetap hidup).
-    <br>• <b>TEST3 (entry cadangan)</b> [{'AKTIF' if ENABLE_TEST3 else 'NONAKTIF'}]: kalau limit TEST1 BELUM tersentuh sampai 1 candle
-    H1 setelah TEST2 closed, entry DIPINDAH ke ujung wick candle TEST3 (Long → low candle
-    TEST3, Short → high candle TEST3 -- kebalikan arah TEST1). Status di-reset (perlu
-    re-armed dari radius {APPROACH_PCT*100:.1f}% lagi), dan KADALUARSA dihitung ulang dari
-    waktu TEST3. Kalau entry TEST3 berada di sisi salah dari SL, TEST3 dianggap tidak valid
-    dan tetap pakai TEST1.{'' if ENABLE_TEST3 else ' (Fitur ini sedang DIMATIKAN di run ini -- entry tetap di TEST1 sampai expire.)'}
-    <br>• <b>KADALUARSA</b>: kalau dalam <b>{EXPIRE_CANDLES}</b> candle H1 setelah TEST2 (atau
-    setelah TEST3, kalau entry sudah dipindah), limit
-    tidak PERNAH tersentuh (baik masih menunggu maupun sudah armed) → setup GUGUR, dibuang
-    permanen.
-    Tiap level HANYA dipakai 1x (test1+test2 cuma dicoba sekali).
+    <br>• <b>TEST3</b>: candle TEPAT SETELAH TEST2 -- LULUS kalau candle TEST3 TIDAK menyentuh
+    ujung wick candle TEST1 (Long: low TEST3 &gt; high TEST1. Short: high TEST3 &lt; low TEST1).
+    Kalau menyentuh, level gugur. Limit TIDAK dipasang setelah TEST2, baru setelah TEST3 lulus.
+    <br>• <b>ENTRY</b>: LIMIT di UJUNG WICK candle TEST3 (Long → low candle TEST3, Short →
+    high candle TEST3), dipasang begitu candle TEST3 closed. Limit baru RESMI ARMED begitu harga
+    M5 masuk radius <b>{APPROACH_PCT*100:.1f}%</b> dari entry_price, lalu ditunggu sampai
+    TERSENTUH (fill). Kalau menjauh lagi &gt;{APPROACH_PCT*100:.1f}% sebelum tersentuh, limit
+    disarm (balik menunggu, tetap hidup).
+    <br>• <b>KADALUARSA</b>: kalau dalam <b>{EXPIRE_CANDLES}</b> candle H1 setelah TEST3 closed,
+    limit tidak PERNAH tersentuh (baik masih menunggu maupun sudah armed) → setup GUGUR,
+    dibuang permanen.
+    Tiap level HANYA dipakai 1x (test1+test2+test3 cuma dicoba sekali).
     SL adaptif (wick candle TEST2/engulfing), minimum
     <b>{SL_MIN_PCT*100:.2f}%</b> dari entry (=1R). <b>Trailing stop</b>: aktif begitu profit
     capai <b>{TRAIL_ACTIVATE_R:.1f}R</b>, lalu SL mengikuti <b>{TRAIL_STOP_R:.1f}R</b> di
