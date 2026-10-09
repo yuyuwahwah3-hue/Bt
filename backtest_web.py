@@ -52,11 +52,7 @@ RINGKASAN STRATEGI
    Kalau gagal salah satu syarat di atas -> level GUGUR (hanya dicoba
    SEKALI, tidak dicari TEST1 berikutnya lagi).
 
-4) FILTER BOLLINGER (BB_LEN=20, BB_MULT=2, close H1) pada close candle
-   TEST2: Long hanya kalau close TEST2 DI BAWAH garis tengah (basis SMA20);
-   Short hanya kalau close TEST2 DI ATAS garis tengah. Selain itu gugur.
-
-5) ENTRY -- LIMIT di UJUNG WICK candle TEST1 (Long -> high TEST1, Short ->
+4) ENTRY -- LIMIT di UJUNG WICK candle TEST1 (Long -> high TEST1, Short ->
    low TEST1), dipasang begitu TEST2 closed. Baru RESMI AKTIF (armed)
    begitu harga masuk radius APPROACH_PCT (default 2%) dari entry_price,
    lalu ditunggu sampai TERSENTUH. Kalau harga menjauh >2%, disarm (balik
@@ -98,12 +94,10 @@ RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk 1% 
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
-SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', '0.01'))       # SL di ujung wick TEST2, tapi jarak minimum 1% dari entry (diperlebar kalau wick-nya lebih dekat)
-BB_LEN           = int(os.environ.get('BB_LEN', '20'))                # Bollinger Bands: panjang (SMA basis dari close H1)
-BB_MULT          = float(os.environ.get('BB_MULT', '2'))              # Bollinger Bands: multiplier std-dev (band atas/bawah; filter entry hanya pakai garis tengah/basis)
+SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', '0.04'))       # SL di ujung wick TEST2, tapi jarak minimum 1% dari entry (diperlebar kalau wick-nya lebih dekat)
 APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.02'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
-TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 3R
-TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
+TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '1.0'))    # trailing aktif begitu profit capai 3R
+TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '0.5'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
@@ -372,7 +366,7 @@ def find_levels(df):
 
 def detect_snr_events(df):
     """Deteksi level Support & Resistance, lalu cari TEST1+TEST2 (engulfing)
-    utk tiap level yang terbentuk. Entry = LIMIT di ujung wick candle TEST1 (+ filter Bollinger mid pada close TEST2).
+    utk tiap level yang terbentuk. Entry = LIMIT di ujung wick candle TEST1.
 
     Urutan:
     1) Level terbentuk (find_levels): c1+c2 (2 candle berlawanan arah), c3
@@ -391,14 +385,11 @@ def detect_snr_events(df):
        TIDAK ADA syarat arah candle TEST2 secara terpisah. Kalau gagal
        engulfing -> level GUGUR (hanya dicoba SEKALI, tidak dicari TEST1
        berikutnya lagi).
-    4) FILTER BOLLINGER (BB_LEN, BB_MULT) pada close TEST2: Long hanya kalau
-       close TEST2 < garis tengah (SMA); Short hanya kalau close TEST2 > garis
-       tengah. Selain itu level GUGUR.
-    5) ENTRY: LIMIT di ujung wick candle TEST1 (Long -> high, Short -> low),
+    4) ENTRY: LIMIT di ujung wick candle TEST1 (Long -> high, Short -> low),
        dipasang begitu TEST2 closed. Limit baru RESMI ARMED begitu harga M5
        masuk radius APPROACH_PCT (default 2%) dari entry_price, lalu ditunggu
        sampai TERSENTUH (fill). SL di ujung wick TEST2, minimal SL_MIN_PCT.
-    6) KADALUARSA: kalau dalam EXPIRE_CANDLES (default 4) candle H1 SETELAH
+    5) KADALUARSA: kalau dalam EXPIRE_CANDLES (default 4) candle H1 SETELAH
        TEST2 closed limit tidak PERNAH tersentuh -> setup GUGUR.
 
     Return list dict:
@@ -412,13 +403,6 @@ def detect_snr_events(df):
     n = len(df)
     WICK_EPS = 1e-9
     levels = find_levels(df)
-    # Bollinger Bands (BB_LEN, BB_MULT) dari close H1: basis = SMA(BB_LEN),
-    # upper/lower = basis +/- BB_MULT * std (populasi, spt TradingView).
-    _cs = pd.Series(c)
-    bb_mid = _cs.rolling(BB_LEN).mean().values
-    bb_dev = (_cs.rolling(BB_LEN).std(ddof=0) * BB_MULT).values
-    bb_upper = bb_mid + bb_dev
-    bb_lower = bb_mid - bb_dev
     events = []
 
     for lv in levels:
@@ -471,17 +455,6 @@ def detect_snr_events(df):
         wick_total_t2 = (h[t2] - body_top) + (body_bottom - l[t2])
         if not (body_size_t2 > wick_total_t2 + WICK_EPS):
             continue   # body TEST2 tidak lebih besar dari total wick-nya sendiri -> level gugur
-
-        # FILTER BOLLINGER (BB_LEN=20, BB_MULT=2) pada close candle TEST2:
-        # Long hanya kalau close TEST2 DI BAWAH garis tengah (basis) pita;
-        # Short hanya kalau close TEST2 DI ATAS garis tengah. Selain itu gugur.
-        mid_t2 = bb_mid[t2]
-        if np.isnan(mid_t2):
-            continue   # data awal belum cukup utk BB -> gugur
-        if ty == 'support' and not (c[t2] < mid_t2):
-            continue   # Long tapi close TEST2 tidak di bawah mid BB -> gugur
-        if ty == 'resistance' and not (c[t2] > mid_t2):
-            continue   # Short tapi close TEST2 tidak di atas mid BB -> gugur
 
         kind = 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE'
         direction = 'Long' if ty == 'support' else 'Short'
@@ -957,7 +930,7 @@ def _run():
     try:
         _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + EMA{EMA_FAST}/{EMA_SLOW} cross) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
         _log_msg(f"   Syarat: c2/c3/c4 (salah satu) wajib penyebab golden/death cross searah  "
-                  f"Filter BB({BB_LEN},{BB_MULT:g}): Long jika close TEST2 < mid, Short jika > mid  Entry=LIMIT di ujung wick TEST1 (armed dlm radius {APPROACH_PCT*100:.1f}%, setelah TEST1+TEST2 engulfing, body TEST2>body TEST1, body TEST2>wick TEST2)  "
+                  f"Entry=LIMIT di ujung wick TEST1 (armed dlm radius {APPROACH_PCT*100:.1f}%, setelah TEST1+TEST2 engulfing, body TEST2>body TEST1, body TEST2>wick TEST2)  "
                   f"SL=ujung wick TEST2, min {SL_MIN_PCT*100:.2f}% dari entry  "
                   f"Trailing: aktif di "
                   f"{TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme")
@@ -1149,9 +1122,6 @@ def _render_html() -> bytes:
     dihitung) daripada body candle TEST1 DAN body candle TEST2 harus lebih BESAR daripada
     TOTAL WICK candle TEST2 itu sendiri (candle TEST2 harus "solid", body dominan). Tidak ada
     syarat arah candle terpisah. Kalau gagal salah satu syarat, level gugur (hanya dicoba 1x).
-    <br>• <b>FILTER BOLLINGER</b> (panjang {BB_LEN}, mult {BB_MULT:g}) pada close candle TEST2: Long hanya
-    kalau close TEST2 <b>di bawah</b> garis tengah pita; Short hanya kalau close TEST2 <b>di atas</b>
-    garis tengah. Selain itu level gugur.
     <br>• <b>ENTRY</b>: LIMIT di UJUNG WICK candle TEST1 (Long → high candle TEST1, Short → low
     candle TEST1), dipasang begitu TEST2 closed. Limit baru RESMI ARMED begitu harga M5 masuk
     radius <b>{APPROACH_PCT*100:.1f}%</b> dari entry_price, lalu ditunggu sampai TERSENTUH (fill).
