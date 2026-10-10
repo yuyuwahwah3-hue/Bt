@@ -98,10 +98,10 @@ RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk 1% 
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
-SL_PCT           = float(os.environ.get('SL_PCT', '0.01'))           # SL FIX 1% dari entry (Long: entry*(1-1%), Short: entry*(1+1%))
-APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.02'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
-TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 3R
-TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
+SL_PCT           = float(os.environ.get('SL_PCT', '0.02'))           # SL FIX 1% dari entry (Long: entry*(1-1%), Short: entry*(1+1%))
+APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.04'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
+TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '4.0'))    # trailing aktif begitu profit capai 3R
+TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '2.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
