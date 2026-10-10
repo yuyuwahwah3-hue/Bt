@@ -91,8 +91,8 @@ from pybit.unified_trading import HTTP
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))   # modal awal, 1 akun bersama
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk 1% balance/trade (compound)
-FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
-FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
+FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0055'))
+FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.00055 * 3)))
 
 SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', '0.01'))       # SL di ujung wick TEST2, jarak minimum 1% dari entry (diperlebar kalau wick-nya lebih dekat)
 APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.02'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
