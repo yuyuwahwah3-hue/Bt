@@ -95,8 +95,8 @@ FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', '0.01'))       # SL di ujung wick TEST2, jarak minimum 1% dari entry (diperlebar kalau wick-nya lebih dekat)
-APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.03'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
-TP_R             = float(os.environ.get('TP_R', '1.5'))                # TAKE PROFIT tetap di 2R (jarak 2x jarak SL dari entry), tanpa trailing stop
+APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.02'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
+TP_R             = float(os.environ.get('TP_R', '2.0'))                # TAKE PROFIT tetap di 2R (jarak 2x jarak SL dari entry), tanpa trailing stop
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
@@ -290,7 +290,7 @@ def fetch_bybit_m5(symbol: str) -> pd.DataFrame:
 EMA_FAST = int(os.environ.get('EMA_FAST', 4))
 EMA_SLOW = int(os.environ.get('EMA_SLOW', 10))
 N_RIGHT = 1   # jumlah candle kanan yang harus bersih (tidak menyentuh wick) -- cukup c3 saja
-EXPIRE_CANDLES = 5   # level kadaluarsa kalau limit tak tersentuh dlm N candle H1 setelah TEST2
+EXPIRE_CANDLES = 4   # level kadaluarsa kalau limit tak tersentuh dlm N candle H1 setelah TEST2
 
 def find_levels(df):
     """Deteksi level Support & Resistance dari candle H1 (basis body candle).
