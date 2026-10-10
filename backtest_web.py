@@ -22,6 +22,9 @@ RINGKASAN STRATEGI
               close H1) searah level: Support -> GOLDEN CROSS, Resistance ->
               DEATH CROSS. Kalau tidak ada, level GUGUR.
 
+   WARMUP: c1 harus di candle ke-EMA_WARMUP (default 50) ke atas. EMA dihitung
+   dari awal data (ewm), jadi cross di candle-candle awal bisa palsu/belum stabil.
+
 2) SENTUHAN LEVEL -- candle PERTAMA setelah c3 yang wick/body-nya MENYENTUH
    ATAU MELEBIHI level (support: low <= level; resistance: high >= level).
    Tersentuh persis di harga level juga VALID. Tidak ada syarat arah candle.
@@ -273,6 +276,7 @@ def fetch_bybit_m5(symbol: str) -> pd.DataFrame:
 
 EMA_FAST = int(os.environ.get('EMA_FAST', 4))
 EMA_SLOW = int(os.environ.get('EMA_SLOW', 10))
+EMA_WARMUP = int(os.environ.get('EMA_WARMUP', 50))   # c1 level harus di candle ke-N ke atas (EMA awal data belum stabil, cross di awal bisa palsu)
 N_RIGHT = 1   # jumlah candle kanan yang harus bersih (tidak menyentuh wick) -- cukup c3 saja
 EXPIRE_CANDLES = 4   # limit kadaluarsa kalau tak tersentuh dlm N candle H1 setelah candle cross closed
 
@@ -317,7 +321,7 @@ def find_levels(df):
         return ema_fast[j - 1] >= ema_slow[j - 1] and ema_fast[j] < ema_slow[j]
 
     levels = []
-    for i in range(0, n - 3):   # perlu c1,c2,c3,c4 (i..i+3) semua ada di dalam data
+    for i in range(EMA_WARMUP, n - 3):   # skip candle warmup EMA; perlu c1,c2,c3,c4 (i..i+3) semua ada di dalam data
         golden_cross_c2_c4 = any(golden_cross_at(j) for j in (i + 1, i + 2, i + 3))
         death_cross_c2_c4  = any(death_cross_at(j) for j in (i + 1, i + 2, i + 3))
         if c[i] < o[i] and c[i + 1] > o[i + 1]:          # bearish lalu bullish -> support
