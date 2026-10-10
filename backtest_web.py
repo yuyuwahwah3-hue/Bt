@@ -60,8 +60,10 @@ RINGKASAN STRATEGI
    tanpa fill -> gugur.
    SL = di ujung wick candle TEST2 (Long -> low, Short -> high), minimal
    SL_MIN_PCT (1%) dari entry (diperlebar kalau wick lebih dekat).
-   TAKE PROFIT: tetap TP_R (2R) dari entry, TANPA trailing stop. Level MATI
-   setelah 1x FILLED.
+   TRAILING STOP: aktif di TRAIL_ACTIVATE_R (2R), SL mengikuti TRAIL_STOP_R (1R)
+   di belakang harga ekstrem (dipantau M5). Kalau di candle M5 yg sama harga
+   menyentuh SL dan trailing sekaligus aktif/naik -> yg dihitung SL (SL dicek
+   duluan). Level MATI setelah 1x FILLED.
 
 Deploy ke Railway:
   Start command -> python backtest_snr.py
@@ -73,7 +75,7 @@ di-override lewat env BACKTEST_START_DATE / BACKTEST_END_DATE).
 trades.csv sekarang menyertakan waktu (WIB, UTC+7) level terbentuk,
 waktu entry, dan waktu exit -- kolom 'level_formed_wib', 'entry_wib',
 'exit_wib' -- selain versi epoch ms mentahnya. Kolom 'reason' berisi
-'SL' atau 'TP' (exit karena stop-loss atau take profit 2R).
+'SL' atau 'TRAIL' (hasil exit karena stop-loss awal atau trailing stop).
 """
 
 import os, threading, time, io, csv
@@ -91,12 +93,13 @@ from pybit.unified_trading import HTTP
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))   # modal awal, 1 akun bersama
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk 1% balance/trade (compound)
-FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0055'))
-FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.00055 * 3)))
+FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
+FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', '0.01'))       # SL di ujung wick TEST2, jarak minimum 1% dari entry (diperlebar kalau wick-nya lebih dekat)
 APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.02'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
-TP_R             = float(os.environ.get('TP_R', '2.0'))                # TAKE PROFIT tetap di 2R (jarak 2x jarak SL dari entry), tanpa trailing stop
+TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 2R
+TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
@@ -584,8 +587,6 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         direction = ev['direction']
         sl = ev['sl_price']
         dist = abs(entry_price - sl)   # = 1R (SL di wick TEST2, floor SL_MIN_PCT)
-        # TAKE PROFIT tetap TP_R (2R) dari entry; tidak ada trailing stop.
-        tp = entry_price + TP_R * dist if direction == 'Long' else entry_price - TP_R * dist
 
         risk_amount = balance * RISK_PCT
         raw_qty = risk_amount / dist if dist > 0 else 0
@@ -607,7 +608,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'dist': dist, 'qty': qty, 'entry_ts': entry_ts, 'level': ev['level'],
             'kind': ev['kind'], 'margin': margin_needed, 'confirm_ts': ev['confirm_ts'],
             'c1_ts': ev['c1_ts'], 'test1_ts': ev['test1_ts'],
-            'tp': tp,
+            'trail_active': False, 'extreme': entry_price,   # high/low-water mark, mulai dari entry
         }
         total_margin_used += margin_needed
         positions_by_symbol.setdefault(symbol, set()).add(key)
@@ -643,23 +644,52 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         now_ts = int(m5['TS'][j])
         hi, lo, close_p = m5['H'][j], m5['L'][j], m5['C'][j]
 
-        # 1) exit posisi aktif simbol ini: SL tetap & TP tetap 2R (tanpa trailing).
-        #    Kalau SL dan TP sama-sama tercapai di 1 candle M5 -> SL dihitung
-        #    duluan (worst-case, konservatif).
+        # 1) exit posisi aktif simbol ini (trailing stop: aktif di TRAIL_ACTIVATE_R,
+        #    SL mengikuti TRAIL_STOP_R di belakang harga ekstrem).
+        #    ATURAN SIMULTAN: kalau di candle M5 yg SAMA harga menyentuh SL
+        #    (level SL SEBELUM candle ini) dan sekaligus trailing akan aktif /
+        #    naik, maka yg dihitung = SL (SL dicek DULUAN, sebelum trailing
+        #    di-update memakai high/low candle yg sama).
         keys = positions_by_symbol.get(symbol)
         if keys:
             for key in list(keys):
                 pos = active_positions[key]
-                if pos['direction'] == 'Long':
+                direction = pos['direction']
+                entry, dist = pos['entry'], pos['dist']
+                reason_stop = 'TRAIL' if pos['trail_active'] else 'SL'
+
+                if direction == 'Long':
+                    # 1a) SL (level sebelum candle ini) tersentuh -> keluar di SL, trailing tidak diproses
                     if lo <= pos['sl'] + 1e-12:
-                        close_trade(key, pos['sl'], 'SL', now_ts)
-                    elif hi >= pos['tp'] - 1e-12:
-                        close_trade(key, pos['tp'], 'TP', now_ts)
+                        close_trade(key, pos['sl'], reason_stop, now_ts)
+                        continue
+                    # 1b) tidak kena SL -> update high-water mark & trailing pakai HIGH candle
+                    if hi > pos['extreme']:
+                        pos['extreme'] = hi
+                    profit_r = (pos['extreme'] - entry) / dist
+                    if not pos['trail_active'] and profit_r >= TRAIL_ACTIVATE_R:
+                        pos['trail_active'] = True
+                    if pos['trail_active']:
+                        new_sl = pos['extreme'] - TRAIL_STOP_R * dist
+                        if new_sl > pos['sl']:
+                            pos['sl'] = new_sl   # SL cuma boleh naik (menguntungkan), tak pernah mundur
+                            if lo <= pos['sl'] + 1e-12:   # candle yg sama balik menyentuh SL trailing baru
+                                close_trade(key, pos['sl'], 'TRAIL', now_ts)
                 else:  # Short
                     if hi >= pos['sl'] - 1e-12:
-                        close_trade(key, pos['sl'], 'SL', now_ts)
-                    elif lo <= pos['tp'] + 1e-12:
-                        close_trade(key, pos['tp'], 'TP', now_ts)
+                        close_trade(key, pos['sl'], reason_stop, now_ts)
+                        continue
+                    if lo < pos['extreme']:
+                        pos['extreme'] = lo
+                    profit_r = (entry - pos['extreme']) / dist
+                    if not pos['trail_active'] and profit_r >= TRAIL_ACTIVATE_R:
+                        pos['trail_active'] = True
+                    if pos['trail_active']:
+                        new_sl = pos['extreme'] + TRAIL_STOP_R * dist
+                        if new_sl < pos['sl']:
+                            pos['sl'] = new_sl
+                            if hi >= pos['sl'] - 1e-12:
+                                close_trade(key, pos['sl'], 'TRAIL', now_ts)
 
         # 2) limit live simbol ini: waiting (belum dlm radius 2%) -> armed
         #    (sudah dlm radius 2%, limit resmi terpasang) -> tersentuh (fill).
@@ -917,7 +947,7 @@ def _run():
         _log_msg(f"   Syarat: c2/c3/c4 (salah satu) wajib penyebab golden/death cross searah  "
                   f"Entry=LIMIT di ujung wick TEST1 (armed dlm radius {APPROACH_PCT*100:.1f}%, setelah TEST1+TEST2 engulfing, body TEST2>body TEST1, body TEST2>wick TEST2)  "
                   f"SL=ujung wick TEST2, min {SL_MIN_PCT*100:.2f}% dari entry  "
-                  f"TP=tetap {TP_R:.1f}R (tanpa trailing)")
+                  f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
 
         coins = {}
         m5_data = {}
@@ -1115,9 +1145,10 @@ def _render_html() -> bytes:
     limit tidak PERNAH tersentuh → setup GUGUR, dibuang permanen.
     Tiap level HANYA dipakai 1x (test1+test2 cuma dicoba sekali).
     SL di ujung wick candle TEST2, minimum <b>{SL_MIN_PCT*100:.2f}%</b> dari entry (=1R).
-    <b>Take profit tetap {TP_R:.1f}R</b> dari entry (tanpa trailing stop). Kalau SL dan TP
-    tersentuh di candle M5 yang sama, SL dihitung duluan. Level MATI setelah 1x terisi
-    (menang/kalah).
+    <b>Trailing stop</b>: aktif begitu profit capai <b>{TRAIL_ACTIVATE_R:.1f}R</b>, lalu SL mengikuti
+    <b>{TRAIL_STOP_R:.1f}R</b> di belakang harga tertinggi/terendah yang pernah dicapai (dipantau M5).
+    Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>. Level MATI
+    setelah 1x terisi (menang/kalah).
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
     Sinyal terblokir — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
     min order: {cr.get('blocked_by_min_order',0)}. Kadaluarsa (limit tak tersentuh
