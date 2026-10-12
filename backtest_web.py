@@ -3,8 +3,7 @@ backtest_web.py — Backtest strategi Support & Resistance + monitoring M5, H1/M
 ================================================================================
 Level Support/Resistance AWAL dari candle H1 (c1,c2 berlawanan arah, c3 bersih,
 EMA cross searah di c2-c4). Setelah level tersentuh, harga DIPANTAU di M5:
-body M5 harus menembus ujung wick terpanjang c1/c2 KELUAR, lalu body M5 menembus
-level (close[c1]) lagi MASUK.
+body M5 harus menembus level KELUAR, lalu body M5 menembus level lagi MASUK.
 Begitu body M5 break MASUK -> pasang LIMIT entry di angka level itu, fill saat
 harga retest level. SL = ujung wick terpanjang c1/c2. Tidak ada EMA cross kedua,
 tidak ada level kedua, tidak ada filter wick.
@@ -29,18 +28,15 @@ RINGKASAN STRATEGI
    terakhir dari keduanya closed) -- monitoring M5 mulai dari situ (tanpa lookahead).
 
 2) MONITORING M5 (mulai setelah level siap; level tersentuh otomatis tercakup
-   karena body yang menembus ujung wick pasti sudah melewati/menyentuh level):
-   'wick_tip' = ujung wick TERPANJANG antara c1 dan c2 (sama dengan harga SL,
-   lihat bagian 4). 'level' = close[c1].
+   karena body yang menembus level pasti menyentuhnya):
    Support:
-     a) KELUAR : body M5 break DI BAWAH wick_tip (close M5 < wick_tip), BUKAN level.
-                 Wick tidak dihitung.
-     b) MASUK  : setelah (a), body M5 break balik DI ATAS LEVEL (close M5 > level).
+     a) KELUAR : body M5 break DI BAWAH level  (close M5 < level).  Wick tidak dihitung.
+     b) MASUK  : setelah (a), body M5 break balik DI ATAS level (close M5 > level).
      c) GUGUR  : setelah (a), kalau harga M5 turun sampai LEVEL_FAIL_PCT (2%)
-                 di bawah WICK_TIP (low <= wick_tip x 0.98) SEBELUM atau di candle
-                 yang sama dengan (b) -> level gugur, tidak ada entry.
-   Resistance: kebalikannya (KELUAR close M5 > wick_tip, MASUK close M5 < level,
-   GUGUR kalau high >= wick_tip x 1.02).
+                 di bawah level (low <= level x 0.98) SEBELUM atau di candle yang
+                 sama dengan (b) -> level gugur, tidak ada entry.
+   Resistance: kebalikannya (KELUAR close M5 > level, MASUK close M5 < level,
+   GUGUR kalau high >= level x 1.02).
    Level yang belum pernah break keluar tetap dipantau (tidak ada batas waktu).
 
 3) ENTRY -- begitu (b) MASUK terjadi (candle M5 closed): pasang LIMIT di ANGKA LEVEL
@@ -94,7 +90,7 @@ FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 LIMIT_EXPIRE_HOURS = float(os.environ.get('LIMIT_EXPIRE_HOURS', '4'))   # limit tidak terfill dalam N jam sejak candle MASUK closed -> gugur
-LEVEL_FAIL_PCT   = float(os.environ.get('LEVEL_FAIL_PCT', '0.02'))   # setelah body M5 break KELUAR, kalau harga sampai 2% dari ujung wick terpanjang c1/c2 -> level gugur
+LEVEL_FAIL_PCT   = float(os.environ.get('LEVEL_FAIL_PCT', '0.02'))   # setelah body M5 break KELUAR, kalau harga sampai 2% dari level -> level gugur
 TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 2R
 TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
 
@@ -393,40 +389,36 @@ def find_levels(df):
 # candle tidak bisa jadi TEST dan BREAK sekaligus, jadi otomatis break selalu
 # candle yang berbeda dan setelah test pertama).
 
-def _m5_break_entry(m5, ty, level, start_ts, out_level=None):
+def _m5_break_entry(m5, ty, level, start_ts):
     """Monitoring M5 satu level mulai start_ts (tanpa lookahead, semua pakai close candle).
-    out_level = batas break KELUAR sekaligus acuan GUGUR (default = level). Di strategi
-    ini = ujung wick terpanjang c1/c2. Break MASUK tetap memakai level.
-    Support : KELUAR = close < out_level; MASUK = close > level (setelah keluar);
-              GUGUR = low <= out_level x (1 - LEVEL_FAIL_PCT) (setelah/di candle keluar).
-    Resistance: kebalikannya (KELUAR close > out_level, MASUK close < level,
-              GUGUR high >= out_level x (1 + LEVEL_FAIL_PCT)).
+    Support : KELUAR = close < level; MASUK = close > level (setelah keluar);
+              GUGUR = low <= level x (1 - LEVEL_FAIL_PCT) (setelah/di candle keluar).
+    Resistance: kebalikannya (KELUAR close > level, MASUK close < level,
+              GUGUR high >= level x (1 + LEVEL_FAIL_PCT)).
     Gugur di candle yang sama dgn MASUK dihitung gugur (konservatif).
     Return (status, k_out, m_in):
       'none'    -- belum pernah break keluar
       'waiting' -- sudah keluar, belum masuk & belum gugur
       'failed'  -- gugur sebelum masuk
       'entry'   -- masuk di index m_in (k_out = index candle keluar)"""
-    if out_level is None:
-        out_level = level
     TS, H, L, C = m5['TS'], m5['H'], m5['L'], m5['C']
     n5 = len(TS)
     s0 = int(np.searchsorted(TS, start_ts, side='left'))
     if s0 >= n5:
         return 'none', None, None
     if ty == 'support':
-        out_mask = C[s0:] < out_level
+        out_mask = C[s0:] < level
     else:
-        out_mask = C[s0:] > out_level
+        out_mask = C[s0:] > level
     if not out_mask.any():
         return 'none', None, None
     k = s0 + int(out_mask.argmax())
 
     if ty == 'support':
-        fail_mask = L[k:] <= out_level * (1 - LEVEL_FAIL_PCT)
+        fail_mask = L[k:] <= level * (1 - LEVEL_FAIL_PCT)
         in_mask = C[k + 1:] > level
     else:
-        fail_mask = H[k:] >= out_level * (1 + LEVEL_FAIL_PCT)
+        fail_mask = H[k:] >= level * (1 + LEVEL_FAIL_PCT)
         in_mask = C[k + 1:] < level
     g = (k + int(fail_mask.argmax())) if fail_mask.any() else None
     m = (k + 1 + int(in_mask.argmax())) if in_mask.any() else None
@@ -465,11 +457,10 @@ def detect_snr_events(df, m5):
     """Level Support & Resistance AWAL (find_levels) -> monitoring M5 -> LIMIT entry.
 
     Per level: mulai dari candle M5 pertama setelah level siap (candle confirm_i
-    closed), cari body M5 KELUAR (menembus ujung wick terpanjang c1/c2) lalu body M5
-    MASUK (balik menembus level) -- lihat _m5_break_entry.
+    closed), cari body M5 KELUAR lalu body M5 MASUK (lihat _m5_break_entry).
     Begitu MASUK: LIMIT di angka level, fill saat harga retest level
     (_m5_limit_fill). SL = ujung wick terpanjang c1/c2 (bukan persen tetap).
-    Gugur kalau setelah keluar harga sampai LEVEL_FAIL_PCT (2%) dari ujung wick, atau
+    Gugur kalau setelah keluar harga sampai LEVEL_FAIL_PCT (2%) dari level, atau
     limit tidak terfill dalam LIMIT_EXPIRE_HOURS (4 jam) sejak candle MASUK closed.
 
     Return (events, stats):
@@ -493,7 +484,7 @@ def detect_snr_events(df, m5):
             stats['no_sl'] += 1   # c1 dan c2 tidak punya wick yg valid utk SL
             continue
         start_ts = int(ts[lv['confirm_i']]) + 3600 * 1000   # candle confirm closed
-        status, k, m = _m5_break_entry(m5, ty, level, start_ts, out_level=lv['wick_tip'])
+        status, k, m = _m5_break_entry(m5, ty, level, start_ts)
         if status == 'failed':
             stats['failed'] += 1
             continue
@@ -931,8 +922,8 @@ def _run():
     global _monthly_results, _avg_monthly_growth
     try:
         _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + EMA{EMA_FAST}/{EMA_SLOW} cross) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
-        _log_msg(f"   Syarat: level awal c1-c2 + cross di c2/c3/c4 -> monitoring M5: body M5 KELUAR ujung wick terpanjang c1/c2 lalu body M5 MASUK level -> pasang LIMIT di angka level (batal kalau tak terisi {LIMIT_EXPIRE_HOURS:g} jam)  "
-                  f"(gugur kalau setelah keluar harga {LEVEL_FAIL_PCT*100:.1f}% dari ujung wick)  "
+        _log_msg(f"   Syarat: level awal c1-c2 + cross di c2/c3/c4 -> monitoring M5: body M5 KELUAR level lalu body M5 MASUK -> pasang LIMIT di angka level (batal kalau tak terisi {LIMIT_EXPIRE_HOURS:g} jam)  "
+                  f"(gugur kalau setelah keluar harga {LEVEL_FAIL_PCT*100:.1f}% dari level)  "
                   f"SL = ujung wick terpanjang c1/c2  "
                   f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
 
@@ -1118,12 +1109,11 @@ def _render_html() -> bytes:
     menyentuh level), dan salah satu dari c2/c3/c4 wajib jadi PENYEBAB cross
     EMA{EMA_FAST}/EMA{EMA_SLOW} searah (Support → GOLDEN CROSS, Resistance → DEATH CROSS).
     c1 baru dihitung setelah {EMA_WARMUP} candle H1 pertama (warmup EMA).
-    <br>• <b>Monitoring M5</b> (setelah level siap): <b>body</b> M5 harus menembus
-    <b>ujung wick terpanjang c1/c2</b> <b>KELUAR</b> (Support: close di bawah ujung wick;
-    Resistance: close di atasnya), lalu body M5 menembus <b>level</b> lagi <b>MASUK</b>
-    (Support: close di atas level; Resistance: close di bawah level). Wick tidak dihitung.
-    <br>• <b>GUGUR</b>: setelah KELUAR, kalau harga sampai <b>{LEVEL_FAIL_PCT*100:.1f}%</b> dari ujung wick
-    (Support: low ≤ ujung wick −{LEVEL_FAIL_PCT*100:.1f}%; Resistance: high ≥ ujung wick +{LEVEL_FAIL_PCT*100:.1f}%)
+    <br>• <b>Monitoring M5</b> (setelah level siap): <b>body</b> M5 harus menembus level
+    <b>KELUAR</b> (Support: close di bawah level; Resistance: close di atas), lalu body M5 menembus
+    level lagi <b>MASUK</b> (close balik ke sisi semula). Wick tidak dihitung.
+    <br>• <b>GUGUR</b>: setelah KELUAR, kalau harga sampai <b>{LEVEL_FAIL_PCT*100:.1f}%</b> dari level
+    (Support: low ≤ level −{LEVEL_FAIL_PCT*100:.1f}%; Resistance: high ≥ level +{LEVEL_FAIL_PCT*100:.1f}%)
     sebelum MASUK → level gugur. Level yang belum pernah KELUAR tetap dipantau.
     <br>• <b>ENTRY</b>: begitu body M5 MASUK → pasang <b>LIMIT</b> di <b>angka level</b> yang tadi
     ditembus (Support → Long, Resistance → Short). Limit terisi saat harga M5 retest level
@@ -1137,7 +1127,7 @@ def _render_html() -> bytes:
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
     Sinyal terblokir — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
     min order: {cr.get('blocked_by_min_order',0)}. Level gugur (M5 keluar lalu
-    {LEVEL_FAIL_PCT*100:.1f}% dari ujung wick): {cr.get('failed_count',0)}. Limit kadaluarsa
+    {LEVEL_FAIL_PCT*100:.1f}% dari level): {cr.get('failed_count',0)}. Limit kadaluarsa
     (tak terisi {LIMIT_EXPIRE_HOURS:g} jam): {cr.get('expired_count',0)}.
     <br>Unduh semua trade: <a href="/trades.csv">/trades.csv</a> &nbsp;|&nbsp;
     Log mentah: <a href="/logs">/logs</a>
