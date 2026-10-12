@@ -55,10 +55,8 @@ Deploy ke Railway:
 Periode default: 1 tahun ke belakang dari hari script dijalankan (bisa
 di-override lewat env BACKTEST_START_DATE / BACKTEST_END_DATE).
 
-trades.csv menyertakan waktu (WIB, UTC+7) level terbentuk, M5 break keluar,
-entry, dan exit -- kolom 'level_formed_wib', 'out_wib', 'entry_wib',
-'exit_wib' -- selain versi epoch ms mentahnya. Kolom 'reason' berisi 'SL'
-atau 'TRAIL'.
+trades.csv ringkas (waktu WIB, UTC+7), kolom: Koin, Dir, Hasil ('Trail +1.6R'
+atau 'SL'), Level, Terbentuk, Break out, Break in, Entry, Entry time.
 """
 
 import os, threading, time, io, csv
@@ -549,7 +547,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'symbol': symbol, 'direction': direction, 'entry': entry_price, 'sl': sl,
             'dist': dist, 'qty': qty, 'entry_ts': entry_ts, 'level': ev['level'],
             'kind': ev['kind'], 'margin': margin_needed,
-            'c1_ts': ev['c1_ts'], 'out_ts': ev['out_ts'],
+            'c1_ts': ev['c1_ts'], 'out_ts': ev['out_ts'], 'in_ts': ev['fill_ts'],
             'trail_active': False, 'extreme': entry_price,   # high/low-water mark, mulai dari entry
         }
         total_margin_used += margin_needed
@@ -576,6 +574,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'level_formed_wib': _fmt_wib(pos['c1_ts']),
             'out_ts': pos['out_ts'],
             'out_wib': _fmt_wib(pos['out_ts']),
+            'in_ts': pos['in_ts'],
             'entry_wib': _fmt_wib(pos['entry_ts']),
             'exit_wib': _fmt_wib(exit_ts),
         })
@@ -1083,20 +1082,39 @@ def _render_html() -> bytes:
 </html>'''.encode('utf-8')
 
 
+def _fmt_wib_short(ts_ms):
+    """'2026-07-07 12:40' (WIB, tanpa akhiran)."""
+    return _fmt_wib(ts_ms).replace(' WIB', '')
+
+
+def _fmt_price(x):
+    return f"{float(x):.10g}"
+
+
+def _hasil_str(t):
+    """Trailing -> 'Trail +1.6R' (R bersih setelah fee); SL -> cukup 'SL'."""
+    if t['reason'] == 'TRAIL':
+        return f"Trail {t['r_mult']:+.1f}R"
+    return 'SL'
+
+
+CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Break out', 'Break in', 'Entry', 'Entry time']
+
+
 def _trades_csv() -> bytes:
+    """trades.csv ringkas, waktu dalam WIB (UTC+7). Break out / Break in = waktu
+    OPEN candle M5 yang body-nya menembus level; Entry time = close candle Break in."""
     with _lock:
         trades_cp = list(_all_trades)
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=[
-        'symbol', 'kind', 'direction', 'level',
-        'level_formed_wib', 'out_wib', 'entry_wib', 'exit_wib',
-        'entry', 'sl', 'exit', 'reason', 'r_mult',
-        'pnl_usd', 'balance_after',
-        'level_formed_ts', 'out_ts', 'entry_ts', 'exit_ts'],
-        extrasaction='ignore')
-    writer.writeheader()
+    writer = csv.writer(buf)
+    writer.writerow(CSV_COLUMNS)
     for t in trades_cp:
-        writer.writerow(t)
+        writer.writerow([
+            t['symbol'], t['direction'].upper(), _hasil_str(t), _fmt_price(t['level']),
+            _fmt_wib_short(t['level_formed_ts']), _fmt_wib_short(t['out_ts']),
+            _fmt_wib_short(t['in_ts']), _fmt_price(t['entry']), _fmt_wib_short(t['entry_ts']),
+        ])
     return buf.getvalue().encode('utf-8')
 
 
