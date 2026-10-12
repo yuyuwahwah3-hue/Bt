@@ -3,7 +3,8 @@ backtest_web.py — Backtest strategi Support & Resistance + monitoring M5, H1/M
 ================================================================================
 Level Support/Resistance AWAL dari candle H1 (c1,c2 berlawanan arah, c3 bersih,
 EMA cross searah di c2-c4). Setelah level tersentuh, harga DIPANTAU di M5:
-body M5 harus menembus level KELUAR, lalu body M5 menembus level lagi MASUK.
+body M5 harus menembus level KELUAR (candle break-out harus sebuah FVG), lalu body
+M5 menembus level lagi MASUK.
 Begitu body M5 break MASUK -> pasang LIMIT entry di angka level itu, fill saat
 harga retest level. SL = ujung wick terpanjang c1/c2. Tidak ada EMA cross kedua,
 tidak ada level kedua, tidak ada filter wick.
@@ -31,11 +32,17 @@ RINGKASAN STRATEGI
    karena body yang menembus level pasti menyentuhnya):
    Support:
      a) KELUAR : body M5 break DI BAWAH level  (close M5 < level).  Wick tidak dihitung.
+                 Candle break-out (k) harus sebuah FVG yang melingkupi level:
+                   - candle SEBELUMNYA (k-1): ujung wick BAWAH (low) di ATAS level
+                   - candle SESUDAHNYA (k+1): ujung wick ATAS (high) di BAWAH level
+                 Break-out baru terkonfirmasi saat candle k+1 closed. Break body yang
+                 tidak memenuhi FVG diabaikan (level tetap dipantau).
      b) MASUK  : setelah (a), body M5 break balik DI ATAS level (close M5 > level).
      c) GUGUR  : setelah (a), kalau harga M5 turun sampai LEVEL_FAIL_PCT (2%)
                  di bawah level (low <= level x 0.98) SEBELUM atau di candle yang
                  sama dengan (b) -> level gugur, tidak ada entry.
-   Resistance: kebalikannya (KELUAR close M5 > level, MASUK close M5 < level,
+   Resistance: kebalikannya (KELUAR close M5 > level dengan FVG: high candle k-1
+   di BAWAH level dan low candle k+1 di ATAS level; MASUK close M5 < level,
    GUGUR kalau high >= level x 1.02).
    Level yang belum pernah break keluar tetap dipantau (tidak ada batas waktu).
 
@@ -391,10 +398,15 @@ def find_levels(df):
 
 def _m5_break_entry(m5, ty, level, start_ts):
     """Monitoring M5 satu level mulai start_ts (tanpa lookahead, semua pakai close candle).
-    Support : KELUAR = close < level; MASUK = close > level (setelah keluar);
+    Support : KELUAR = close < level DAN candle itu FVG yang melingkupi level
+              (low candle sebelumnya > level, high candle sesudahnya < level);
+              MASUK = close > level (setelah keluar);
               GUGUR = low <= level x (1 - LEVEL_FAIL_PCT) (setelah/di candle keluar).
-    Resistance: kebalikannya (KELUAR close > level, MASUK close < level,
+    Resistance: kebalikannya (KELUAR close > level DAN high candle sebelumnya <
+              level, low candle sesudahnya > level; MASUK close < level,
               GUGUR high >= level x (1 + LEVEL_FAIL_PCT)).
+    Break body yg bukan FVG diabaikan. Candle k+1 harus sudah closed (konfirmasi
+    FVG), jadi candle terakhir data tidak bisa jadi candle keluar.
     Gugur di candle yang sama dgn MASUK dihitung gugur (konservatif).
     Return (status, k_out, m_in):
       'none'    -- belum pernah break keluar
@@ -406,13 +418,17 @@ def _m5_break_entry(m5, ty, level, start_ts):
     s0 = int(np.searchsorted(TS, start_ts, side='left'))
     if s0 >= n5:
         return 'none', None, None
+    a = max(s0, 1)            # k-1 boleh sebelum s0 (data lampau, bukan lookahead)
+    if a >= n5 - 1:           # perlu candle k+1
+        return 'none', None, None
+    # kandidat k = a .. n5-2 ; candle k-1 = a-1 .. n5-3 ; candle k+1 = a+1 .. n5-1
     if ty == 'support':
-        out_mask = C[s0:] < level
+        out_mask = (C[a:n5 - 1] < level) & (L[a - 1:n5 - 2] > level) & (H[a + 1:n5] < level)
     else:
-        out_mask = C[s0:] > level
+        out_mask = (C[a:n5 - 1] > level) & (H[a - 1:n5 - 2] < level) & (L[a + 1:n5] > level)
     if not out_mask.any():
         return 'none', None, None
-    k = s0 + int(out_mask.argmax())
+    k = a + int(out_mask.argmax())
 
     if ty == 'support':
         fail_mask = L[k:] <= level * (1 - LEVEL_FAIL_PCT)
@@ -457,7 +473,8 @@ def detect_snr_events(df, m5):
     """Level Support & Resistance AWAL (find_levels) -> monitoring M5 -> LIMIT entry.
 
     Per level: mulai dari candle M5 pertama setelah level siap (candle confirm_i
-    closed), cari body M5 KELUAR lalu body M5 MASUK (lihat _m5_break_entry).
+    closed), cari body M5 KELUAR (candle FVG yang melingkupi level) lalu body M5
+    MASUK -- lihat _m5_break_entry.
     Begitu MASUK: LIMIT di angka level, fill saat harga retest level
     (_m5_limit_fill). SL = ujung wick terpanjang c1/c2 (bukan persen tetap).
     Gugur kalau setelah keluar harga sampai LEVEL_FAIL_PCT (2%) dari level, atau
@@ -922,7 +939,7 @@ def _run():
     global _monthly_results, _avg_monthly_growth
     try:
         _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + EMA{EMA_FAST}/{EMA_SLOW} cross) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
-        _log_msg(f"   Syarat: level awal c1-c2 + cross di c2/c3/c4 -> monitoring M5: body M5 KELUAR level lalu body M5 MASUK -> pasang LIMIT di angka level (batal kalau tak terisi {LIMIT_EXPIRE_HOURS:g} jam)  "
+        _log_msg(f"   Syarat: level awal c1-c2 + cross di c2/c3/c4 -> monitoring M5: body M5 KELUAR level (candle FVG) lalu body M5 MASUK -> pasang LIMIT di angka level (batal kalau tak terisi {LIMIT_EXPIRE_HOURS:g} jam)  "
                   f"(gugur kalau setelah keluar harga {LEVEL_FAIL_PCT*100:.1f}% dari level)  "
                   f"SL = ujung wick terpanjang c1/c2  "
                   f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
@@ -1110,8 +1127,11 @@ def _render_html() -> bytes:
     EMA{EMA_FAST}/EMA{EMA_SLOW} searah (Support → GOLDEN CROSS, Resistance → DEATH CROSS).
     c1 baru dihitung setelah {EMA_WARMUP} candle H1 pertama (warmup EMA).
     <br>• <b>Monitoring M5</b> (setelah level siap): <b>body</b> M5 harus menembus level
-    <b>KELUAR</b> (Support: close di bawah level; Resistance: close di atas), lalu body M5 menembus
-    level lagi <b>MASUK</b> (close balik ke sisi semula). Wick tidak dihitung.
+    <b>KELUAR</b> (Support: close di bawah level; Resistance: close di atas) dan candle itu harus
+    sebuah <b>FVG</b> yang melingkupi level (Support: low candle sebelumnya di atas level &amp; high
+    candle sesudahnya di bawah level; Resistance: kebalikannya), lalu body M5 menembus
+    level lagi <b>MASUK</b> (close balik ke sisi semula). Wick tidak dihitung; break body tanpa
+    FVG diabaikan.
     <br>• <b>GUGUR</b>: setelah KELUAR, kalau harga sampai <b>{LEVEL_FAIL_PCT*100:.1f}%</b> dari level
     (Support: low ≤ level −{LEVEL_FAIL_PCT*100:.1f}%; Resistance: high ≥ level +{LEVEL_FAIL_PCT*100:.1f}%)
     sebelum MASUK → level gugur. Level yang belum pernah KELUAR tetap dipantau.
