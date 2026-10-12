@@ -4,9 +4,9 @@ backtest_web.py — Backtest strategi Support & Resistance + monitoring M5, H1/M
 Level Support/Resistance AWAL dari candle H1 (c1,c2 berlawanan arah, c3 bersih,
 EMA cross searah di c2-c4). Setelah level tersentuh, harga DIPANTAU di M5:
 body M5 harus menembus level KELUAR, lalu body M5 menembus level lagi MASUK.
-Begitu body M5 break MASUK -> langsung ENTRY MARKET (fill di close candle M5
-itu). SL 1% dari entry. Tidak ada EMA cross kedua, tidak ada level kedua,
-tidak ada filter wick, tidak ada limit order.
+Begitu body M5 break MASUK -> pasang LIMIT entry di angka level itu, fill saat
+harga retest level. SL = ujung wick terpanjang c1/c2. Tidak ada EMA cross kedua,
+tidak ada level kedua, tidak ada filter wick.
 
 RINGKASAN STRATEGI
 -------------------
@@ -39,14 +39,26 @@ RINGKASAN STRATEGI
    GUGUR kalau high >= level x 1.02).
    Level yang belum pernah break keluar tetap dipantau (tidak ada batas waktu).
 
-3) ENTRY -- begitu (b) MASUK terjadi: MARKET order di CLOSE candle M5 itu.
-   Support -> Long, Resistance -> Short. SL = tepat SL_PCT (1%) dari entry
-   (Long: entry x 0.99, Short: entry x 1.01). Kalau slot/margin/min order tidak
-   cukup saat itu, setup hangus (market order tidak digantung).
+3) ENTRY -- begitu (b) MASUK terjadi (candle M5 closed): pasang LIMIT di ANGKA LEVEL
+   yang tadi ditembus. Support -> Long (buy limit), Resistance -> Short (sell
+   limit). Limit FILL di candle M5 pertama SETELAH candle MASUK yang harganya
+   menyentuh level (Long: low <= level; Short: high >= level), fill di harga level.
+   Wick cukup untuk fill. Limit KADALUARSA kalau tidak terfill dalam
+   LIMIT_EXPIRE_HOURS (default 4 jam) sejak candle MASUK closed -> setup gugur.
+   Level MATI setelah 1x entry (terfill atau gugur). Kalau slot/margin/min order tidak cukup saat fill,
+   setup hangus.
+
+4) STOP LOSS -- TIDAK fix. SL = ujung WICK TERPANJANG antara c1 dan c2 (H1):
+   Support: low dari wick bawah terpanjang; Resistance: high dari wick atas
+   terpanjang. Panjang wick diukur dari ujung body ke ujung wick. Hanya wick yang
+   ujungnya melewati level ke arah SL yang dihitung (SL tidak boleh di sisi yang
+   salah dari entry); kalau c1 maupun c2 tidak punya, level dilewati (tidak ada
+   SL valid). Kalau candle fill juga sudah menyentuh SL -> langsung kena SL.
+   Ukuran posisi = risiko RISK_PCT / jarak entry-SL (jarak itu = 1R).
    TRAILING STOP: aktif di TRAIL_ACTIVATE_R (2R), SL mengikuti TRAIL_STOP_R (1R)
    di belakang harga ekstrem (dipantau M5). Kalau di candle M5 yg sama harga
    menyentuh SL dan trailing sekaligus aktif/naik -> yg dihitung SL (SL dicek
-   duluan). Level MATI setelah 1x entry.
+   duluan).
 
 Deploy ke Railway:
   Start command -> python backtest_web.py
@@ -77,7 +89,7 @@ RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk 1% 
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
-SL_PCT           = float(os.environ.get('SL_PCT', '0.01'))           # SL tepat 1% dari entry (= 1R)
+LIMIT_EXPIRE_HOURS = float(os.environ.get('LIMIT_EXPIRE_HOURS', '4'))   # limit tidak terfill dalam N jam sejak candle MASUK closed -> gugur
 LEVEL_FAIL_PCT   = float(os.environ.get('LEVEL_FAIL_PCT', '0.02'))   # setelah body M5 break KELUAR, kalau harga sampai 2% dari level -> level gugur
 TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 2R
 TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
@@ -172,7 +184,7 @@ _combined_result = {
     'n_trades': 0, 'n_win': 0, 'n_loss': 0, 'wr': 0, 'total_pnl': 0, 'roi': 0,
     'total_r': 0, 'avg_r': 0, 'final_balance': INITIAL_BALANCE,
     'blocked_by_slot': 0, 'blocked_by_margin': 0, 'blocked_by_min_order': 0, 'blocked_by_invalid_sl': 0,
-    'failed_count': 0,
+    'failed_count': 0, 'expired_count': 0,
 }
 
 
@@ -284,6 +296,28 @@ def _compute_emas(c):
     ema_slow = pd.Series(c).ewm(span=EMA_SLOW, adjust=False).mean().values
     return ema_fast, ema_slow
 
+def _longest_wick_tip(o, h, l, c, i, ty, level):
+    """Ujung wick TERPANJANG antara c1 (index i) dan c2 (i+1) = harga SL.
+    Support   : wick bawah, panjang = min(open,close) - low, ujung = low.
+    Resistance: wick atas,  panjang = high - max(open,close), ujung = high.
+    Hanya wick yang ujungnya benar-benar melewati level ke arah SL (support: low <
+    level; resistance: high > level) yang dihitung -- SL tidak boleh di sisi yang
+    salah dari entry. Seri -> c1. Return None kalau tidak ada yg valid."""
+    best_len, best_tip = None, None
+    for idx in (i, i + 1):
+        if ty == 'support':
+            if not (l[idx] < level - 1e-12):
+                continue
+            wl, tip = min(o[idx], c[idx]) - l[idx], l[idx]
+        else:
+            if not (h[idx] > level + 1e-12):
+                continue
+            wl, tip = h[idx] - max(o[idx], c[idx]), h[idx]
+        if best_len is None or wl > best_len:
+            best_len, best_tip = wl, tip
+    return None if best_tip is None else float(best_tip)
+
+
 def find_levels(df):
     """Deteksi level Support & Resistance dari candle H1 (basis body candle).
     Syarat kanan: N_RIGHT candle SETELAH c1,c2 (c3) -- WICK-nya (bukan cuma
@@ -303,7 +337,8 @@ def find_levels(df):
     'confirm_i' = index candle H1 TERAKHIR yang dibutuhkan untuk memastikan level
                   valid = max(c3, cross paling awal di c2-c4). Level baru siap
                   (tanpa lookahead) begitu candle ini closed.
-    Return list dict: {'type', 'level', 'c1', 'c2', 'c_right', 'confirm_i'}."""
+    'wick_tip' = ujung wick terpanjang c1/c2 (harga SL), None kalau tidak ada yg valid.
+    Return list dict: {'type', 'level', 'c1', 'c2', 'c_right', 'confirm_i', 'wick_tip'}."""
     o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
     n = len(df)
     ema_fast, ema_slow = _compute_emas(c)
@@ -324,14 +359,16 @@ def find_levels(df):
             if right_ok and golden_js:
                 c_right = [i + 2 + k for k in range(N_RIGHT)]
                 levels.append({'type': 'support', 'level': float(S), 'c1': i, 'c2': i + 1,
-                               'c_right': c_right, 'confirm_i': max(c_right[-1], min(golden_js))})
+                               'c_right': c_right, 'confirm_i': max(c_right[-1], min(golden_js)),
+                               'wick_tip': _longest_wick_tip(o, h, l, c, i, 'support', float(S))})
         if c[i] > o[i] and c[i + 1] < o[i + 1]:          # bullish lalu bearish -> resistance
             R = c[i]
             right_ok = all(h[i + 2 + k] < R - 1e-9 for k in range(N_RIGHT))
             if right_ok and death_js:
                 c_right = [i + 2 + k for k in range(N_RIGHT)]
                 levels.append({'type': 'resistance', 'level': float(R), 'c1': i, 'c2': i + 1,
-                               'c_right': c_right, 'confirm_i': max(c_right[-1], min(death_js))})
+                               'c_right': c_right, 'confirm_i': max(c_right[-1], min(death_js)),
+                               'wick_tip': _longest_wick_tip(o, h, l, c, i, 'resistance', float(R))})
     return levels
 
 
@@ -392,22 +429,49 @@ def _m5_break_entry(m5, ty, level, start_ts):
     return 'entry', k, m
 
 
+def _m5_limit_fill(m5, ty, level, m_in):
+    """Limit di angka level dipasang setelah candle MASUK (index m_in) closed.
+    Fill di candle M5 pertama SETELAH m_in yang menyentuh level (wick cukup):
+    Long (support): low <= level; Short (resistance): high >= level.
+    KADALUARSA: kalau tidak terfill dalam LIMIT_EXPIRE_HOURS (default 4 jam) sejak
+    candle MASUK closed -> batal. Candle yang open-nya >= waktu kadaluarsa tidak
+    dihitung (dengan 4 jam & M5 = 48 candle setelah candle MASUK).
+    Return (status, index):
+      ('fill', idx)    -- terfill di candle idx
+      ('expired', None)-- jendela waktu sudah lewat (ada data sesudahnya), tidak terfill
+      ('pending', None)-- data habis sebelum jendela selesai, belum terfill"""
+    TS = m5['TS']
+    n5 = len(TS)
+    expire_ts = int(TS[m_in]) + 5 * 60 * 1000 + int(LIMIT_EXPIRE_HOURS * 3600 * 1000)
+    end = int(np.searchsorted(TS, expire_ts, side='left'))   # eksklusif
+    if ty == 'support':
+        mask = m5['L'][m_in + 1:end] <= level
+    else:
+        mask = m5['H'][m_in + 1:end] >= level
+    if mask.any():
+        return 'fill', m_in + 1 + int(mask.argmax())
+    return ('expired' if end < n5 else 'pending'), None
+
+
 def detect_snr_events(df, m5):
-    """Level Support & Resistance AWAL (find_levels) -> monitoring M5 -> entry MARKET.
+    """Level Support & Resistance AWAL (find_levels) -> monitoring M5 -> LIMIT entry.
 
     Per level: mulai dari candle M5 pertama setelah level siap (candle confirm_i
     closed), cari body M5 KELUAR lalu body M5 MASUK (lihat _m5_break_entry).
-    Begitu MASUK: entry market di CLOSE candle M5 itu, SL tepat SL_PCT (1%).
-    Gugur kalau setelah keluar harga sampai LEVEL_FAIL_PCT (2%) dari level.
+    Begitu MASUK: LIMIT di angka level, fill saat harga retest level
+    (_m5_limit_fill). SL = ujung wick terpanjang c1/c2 (bukan persen tetap).
+    Gugur kalau setelah keluar harga sampai LEVEL_FAIL_PCT (2%) dari level, atau
+    limit tidak terfill dalam LIMIT_EXPIRE_HOURS (4 jam) sejak candle MASUK closed.
 
     Return (events, stats):
-    events: list dict {'kind', 'type', 'level', 'direction', 'entry_price',
-            'sl_price', 'fill_ts' (open ts candle M5 saat MASUK), 'out_ts',
-            'confirm_ts', 'c1_ts', 'c1', 'c2'} urut fill_ts
-    stats : {'levels', 'entry', 'failed', 'pending'}"""
+    events: list dict {'kind', 'type', 'level', 'direction', 'entry_price' (= level),
+            'sl_price' (= wick_tip), 'fill_ts' (open ts candle M5 saat limit fill),
+            'in_ts' (open ts candle M5 MASUK), 'out_ts', 'confirm_ts', 'c1_ts',
+            'c1', 'c2'} urut fill_ts
+    stats : {'levels', 'entry', 'failed', 'expired', 'pending', 'no_sl'}"""
     ts = df['ts'].values
     levels = find_levels(df)
-    stats = {'levels': len(levels), 'entry': 0, 'failed': 0, 'pending': 0}
+    stats = {'levels': len(levels), 'entry': 0, 'failed': 0, 'expired': 0, 'pending': 0, 'no_sl': 0}
     events = []
     if m5 is None:
         stats['pending'] = len(levels)
@@ -416,6 +480,9 @@ def detect_snr_events(df, m5):
     for lv in levels:
         ty = lv['type']
         level = lv['level']
+        if lv['wick_tip'] is None:
+            stats['no_sl'] += 1   # c1 dan c2 tidak punya wick yg valid utk SL
+            continue
         start_ts = int(ts[lv['confirm_i']]) + 3600 * 1000   # candle confirm closed
         status, k, m = _m5_break_entry(m5, ty, level, start_ts)
         if status == 'failed':
@@ -424,16 +491,22 @@ def detect_snr_events(df, m5):
         if status != 'entry':
             stats['pending'] += 1
             continue
+        fstatus, f = _m5_limit_fill(m5, ty, level, m)
+        if fstatus == 'expired':
+            stats['expired'] += 1   # limit tidak terfill dalam LIMIT_EXPIRE_HOURS -> gugur
+            continue
+        if fstatus != 'fill':
+            stats['pending'] += 1   # data habis sebelum jendela limit selesai
+            continue
         stats['entry'] += 1
 
-        direction = 'Long' if ty == 'support' else 'Short'
-        entry_price = float(m5['C'][m])   # market fill di close candle M5 MASUK
-        sl_price = entry_price * (1 - SL_PCT) if direction == 'Long' else entry_price * (1 + SL_PCT)
         events.append({
             'kind': 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE',
-            'type': ty, 'level': level, 'direction': direction,
-            'entry_price': entry_price, 'sl_price': sl_price,
-            'fill_ts': int(m5['TS'][m]),
+            'type': ty, 'level': level,
+            'direction': 'Long' if ty == 'support' else 'Short',
+            'entry_price': level, 'sl_price': lv['wick_tip'],
+            'fill_ts': int(m5['TS'][f]),
+            'in_ts': int(m5['TS'][m]),
             'out_ts': int(m5['TS'][k]),
             'confirm_ts': int(ts[lv['confirm_i']]),
             'c1_ts': int(ts[lv['c1']]),
@@ -445,7 +518,7 @@ def detect_snr_events(df, m5):
 
 
 def detect_all_events(df, m5):
-    """Support & Resistance + monitoring M5 -- SNR_SUPPORT (Long) dan
+    """Support & Resistance + monitoring M5 + limit di level -- SNR_SUPPORT (Long) dan
     SNR_RESISTANCE (Short). Dedup: 2 event dgn (kind, level, fill_ts) SAMA
     PERSIS dianggap 1 sinyal yg sama. Return (events, stats)."""
     events, stats = detect_snr_events(df, m5)
@@ -486,7 +559,7 @@ def prepare_coin(symbol, df, m5):
     return {
         'symbol': symbol,
         'TS': df['ts'].values.astype(np.int64),
-        'events': events,   # list entry market (sudah lewat break keluar -> masuk), urut fill_ts
+        'events': events,   # list limit entry (break keluar -> masuk -> limit di level terisi), urut fill_ts
         'stats': stats,
         'n': len(df),
     }
@@ -497,9 +570,10 @@ def prepare_coin(symbol, df, m5):
 # ============================================================
 #
 # Tiap event dari detect_all_events() SUDAH final: level sudah break keluar lalu
-# MASUK di M5 (entry_price = close candle M5 MASUK, fill market). Simulasi
-# cukup membuka posisi saat waktu (M5) sampai di fill_ts event itu. Kalau
-# slot/margin/min order tidak cukup, setup hangus (market order tidak digantung).
+# MASUK di M5, limit di angka level sudah dipasang dan sudah tersentuh di fill_ts
+# (entry_price = level, sl_price = ujung wick terpanjang c1/c2). Simulasi cukup
+# membuka posisi saat waktu (M5) sampai di fill_ts event itu. Kalau slot/margin/
+# min order tidak cukup, setup hangus.
 
 def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
     balance = INITIAL_BALANCE
@@ -516,7 +590,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
 
     positions_by_symbol = {}   # symbol -> set(keys)
 
-    # pending_fills: event market entry (M5 body sudah break MASUK di fill_ts), urut asc per simbol.
+    # pending_fills: event limit entry (limit di level tersentuh di fill_ts), urut asc per simbol.
     pending_fills = {
         symbol: sorted([(ev['fill_ts'], idx) for idx, ev in enumerate(cp['events'])])
         for symbol, cp in coins.items()
@@ -526,7 +600,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         nonlocal balance, total_margin_used
         direction = ev['direction']
         sl = ev['sl_price']
-        dist = abs(entry_price - sl)   # = 1R (SL = SL_PCT dari entry)
+        dist = abs(entry_price - sl)   # = 1R (jarak entry ke SL = ujung wick terpanjang c1/c2)
 
         risk_amount = balance * RISK_PCT
         raw_qty = risk_amount / dist if dist > 0 else 0
@@ -547,7 +621,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'symbol': symbol, 'direction': direction, 'entry': entry_price, 'sl': sl,
             'dist': dist, 'qty': qty, 'entry_ts': entry_ts, 'level': ev['level'],
             'kind': ev['kind'], 'margin': margin_needed,
-            'c1_ts': ev['c1_ts'], 'out_ts': ev['out_ts'], 'in_ts': ev['fill_ts'],
+            'c1_ts': ev['c1_ts'], 'out_ts': ev['out_ts'], 'in_ts': ev['in_ts'],
             'trail_active': False, 'extreme': entry_price,   # high/low-water mark, mulai dari entry
         }
         total_margin_used += margin_needed
@@ -632,17 +706,23 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
                             if hi >= pos['sl'] - 1e-12:
                                 close_trade(key, pos['sl'], 'TRAIL', now_ts)
 
-        # 2) event market entry simbol ini: body M5 sudah break MASUK di candle ini
-        #    (harga entry = close candle ini). Slot/margin/min order tidak cukup ->
-        #    setup hangus (market order tidak digantung). Posisi baru dicek SL/trailing
-        #    mulai candle M5 BERIKUTNYA.
+        # 2) event limit entry simbol ini: limit di angka level tersentuh di candle ini
+        #    (fill di harga level). Slot/margin/min order tidak cukup -> setup hangus.
+        #    Kalau candle fill yang sama juga sudah menyentuh SL (SL = ujung wick, lebih
+        #    jauh dari level, jadi harga pasti lewat level dulu) -> langsung kena SL.
+        #    Kalau tidak, SL/trailing dicek mulai candle M5 BERIKUTNYA.
         plist = pending_fills.get(symbol)
         while plist and plist[0][0] <= now_ts:
             _, idx = plist.pop(0)
             ev = coins[symbol]['events'][idx]
-            opened_key, block_reason = open_trade(symbol, ev, ev['entry_price'], now_ts + 5 * 60 * 1000)
+            opened_key, block_reason = open_trade(symbol, ev, ev['entry_price'], now_ts)
             if opened_key is None:
                 nonlocal_blocks[block_reason] += 1
+            else:
+                pos = active_positions[opened_key]
+                if (pos['direction'] == 'Long' and lo <= pos['sl'] + 1e-12) or \
+                   (pos['direction'] == 'Short' and hi >= pos['sl'] - 1e-12):
+                    close_trade(opened_key, pos['sl'], 'SL', now_ts)
 
     nonlocal_blocks = {'slot': 0, 'margin': 0, 'min_order': 0, 'invalid_sl': 0}
 
@@ -842,9 +922,9 @@ def _run():
     global _monthly_results, _avg_monthly_growth
     try:
         _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + EMA{EMA_FAST}/{EMA_SLOW} cross) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
-        _log_msg(f"   Syarat: level awal c1-c2 + cross di c2/c3/c4 -> monitoring M5: body M5 KELUAR level lalu body M5 MASUK -> ENTRY MARKET di close  "
+        _log_msg(f"   Syarat: level awal c1-c2 + cross di c2/c3/c4 -> monitoring M5: body M5 KELUAR level lalu body M5 MASUK -> pasang LIMIT di angka level (batal kalau tak terisi {LIMIT_EXPIRE_HOURS:g} jam)  "
                   f"(gugur kalau setelah keluar harga {LEVEL_FAIL_PCT*100:.1f}% dari level)  "
-                  f"SL={SL_PCT*100:.2f}% dari entry  "
+                  f"SL = ujung wick terpanjang c1/c2  "
                   f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
 
         coins = {}
@@ -865,12 +945,14 @@ def _run():
                 n_by_kind[ev['kind']] = n_by_kind.get(ev['kind'], 0) + 1
             kind_str = ', '.join(f"{k}:{v}" for k, v in sorted(n_by_kind.items()))
             st = cp['stats']
-            _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['entry']} entry M5 ({kind_str or '-'}), "
-                      f"{st['failed']} gugur (>{LEVEL_FAIL_PCT*100:.0f}%), {st['pending']} belum entry.")
+            _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['entry']} limit terisi ({kind_str or '-'}), "
+                      f"{st['failed']} gugur (>{LEVEL_FAIL_PCT*100:.0f}%), {st['expired']} limit kadaluarsa ({LIMIT_EXPIRE_HOURS:g} jam), "
+                      f"{st['pending']} belum terisi (data habis), {st['no_sl']} tanpa SL valid.")
 
         _log_msg(f"🧮 Menjalankan simulasi gabungan ({len(coins)} koin)...")
         result = run_combined_backtest(coins, m5_data)
         failed_total = sum(cp['stats']['failed'] for cp in coins.values())
+        expired_total = sum(cp['stats']['expired'] for cp in coins.values())
 
         _log_msg(f"🧮 Menjalankan simulasi PER-KOIN (independen, {len(coins)} koin)...")
         per_coin_raw = run_per_coin_backtests(coins, m5_data)
@@ -895,6 +977,7 @@ def _run():
                 'blocked_by_min_order': result['blocked_by_min_order'],
                 'blocked_by_invalid_sl': result['blocked_by_invalid_sl'],
                 'failed_count': failed_total,
+                'expired_count': expired_total,
             })
             _results[:] = per_symbol_breakdown(result['trades'])
             _kind_results[:] = per_kind_breakdown(result['trades'])
@@ -1032,16 +1115,20 @@ def _render_html() -> bytes:
     <br>• <b>GUGUR</b>: setelah KELUAR, kalau harga sampai <b>{LEVEL_FAIL_PCT*100:.1f}%</b> dari level
     (Support: low ≤ level −{LEVEL_FAIL_PCT*100:.1f}%; Resistance: high ≥ level +{LEVEL_FAIL_PCT*100:.1f}%)
     sebelum MASUK → level gugur. Level yang belum pernah KELUAR tetap dipantau.
-    <br>• <b>ENTRY</b>: begitu body M5 MASUK → <b>MARKET</b> di close candle M5 itu
-    (Support → Long, Resistance → Short). Tiap level HANYA dipakai 1x.
-    <br>• <b>SL</b> tepat <b>{SL_PCT*100:.2f}%</b> dari entry (=1R).
+    <br>• <b>ENTRY</b>: begitu body M5 MASUK → pasang <b>LIMIT</b> di <b>angka level</b> yang tadi
+    ditembus (Support → Long, Resistance → Short). Limit terisi saat harga M5 retest level
+    (wick cukup). Kalau tidak terisi dalam <b>{LIMIT_EXPIRE_HOURS:g} jam</b> sejak candle MASUK closed →
+    limit batal, setup gugur. Tiap level HANYA dipakai 1x.
+    <br>• <b>SL</b> = <b>ujung wick terpanjang</b> antara c1 dan c2 (Support: low wick bawah,
+    Resistance: high wick atas), bukan persen tetap. Jarak entry–SL = 1R untuk ukuran posisi.
     <b>Trailing stop</b>: aktif begitu profit capai <b>{TRAIL_ACTIVATE_R:.1f}R</b>, lalu SL mengikuti
     <b>{TRAIL_STOP_R:.1f}R</b> di belakang harga tertinggi/terendah yang pernah dicapai (dipantau M5).
     Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>.
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
     Sinyal terblokir — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
     min order: {cr.get('blocked_by_min_order',0)}. Level gugur (M5 keluar lalu
-    {LEVEL_FAIL_PCT*100:.1f}% dari level): {cr.get('failed_count',0)}.
+    {LEVEL_FAIL_PCT*100:.1f}% dari level): {cr.get('failed_count',0)}. Limit kadaluarsa
+    (tak terisi {LIMIT_EXPIRE_HOURS:g} jam): {cr.get('expired_count',0)}.
     <br>Unduh semua trade: <a href="/trades.csv">/trades.csv</a> &nbsp;|&nbsp;
     Log mentah: <a href="/logs">/logs</a>
   </div>
@@ -1103,7 +1190,8 @@ CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Break out', 'Break
 
 def _trades_csv() -> bytes:
     """trades.csv ringkas, waktu dalam WIB (UTC+7). Break out / Break in = waktu
-    OPEN candle M5 yang body-nya menembus level; Entry time = close candle Break in."""
+    OPEN candle M5 yang body-nya menembus level; Entry = angka level (limit);
+    Entry time = waktu OPEN candle M5 tempat limit terisi."""
     with _lock:
         trades_cp = list(_all_trades)
     buf = io.StringIO()
