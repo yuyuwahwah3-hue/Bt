@@ -91,8 +91,8 @@ FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 LIMIT_EXPIRE_HOURS = float(os.environ.get('LIMIT_EXPIRE_HOURS', '4'))   # limit tidak terfill dalam N jam sejak candle MASUK closed -> gugur
 LEVEL_FAIL_PCT   = float(os.environ.get('LEVEL_FAIL_PCT', '0.02'))   # setelah body M5 break KELUAR, kalau harga sampai 2% dari level -> level gugur
-TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 2R
-TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
+TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '4.0'))    # trailing aktif begitu profit capai 2R
+TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '2.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
