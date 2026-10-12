@@ -1,15 +1,16 @@
 """
-backtest_web.py — Backtest strategi Support & Resistance + EMA cross ULANG, H1
+backtest_web.py — Backtest strategi Support & Resistance + monitoring M5, H1/M5
 ================================================================================
-Level Support/Resistance dari 2 candle berlawanan arah (c1,c2), dikonfirmasi
-1 candle kanan bersih (c3) + EMA cross searah di c2-c4. Setelah level
-TERSENTUH, MENUNGGU EMA cross searah LAGI. Saat cross itu terjadi (candle
-closed) -> cari level S/R BARU di 4 candle sebelum cross, lalu pasang LIMIT
-di level baru itu. TEST1 dan TEST2 (engulfing) sudah DIHAPUS.
+Level Support/Resistance AWAL dari candle H1 (c1,c2 berlawanan arah, c3 bersih,
+EMA cross searah di c2-c4). Setelah level tersentuh, harga DIPANTAU di M5:
+body M5 harus menembus level KELUAR, lalu body M5 menembus level lagi MASUK.
+Begitu body M5 break MASUK -> langsung ENTRY MARKET (fill di close candle M5
+itu). SL 1% dari entry. Tidak ada EMA cross kedua, tidak ada level kedua,
+tidak ada filter wick, tidak ada limit order.
 
 RINGKASAN STRATEGI
 -------------------
-1) DETEKSI LEVEL (H1) -- TIDAK BERUBAH:
+1) DETEKSI LEVEL (H1):
    Support: candle c1 bearish (close<open) lalu c2 bullish (close>open).
             Level = close[c1].
    Resistance: candle c1 bullish (close>open) lalu c2 bearish (close<open).
@@ -21,49 +22,31 @@ RINGKASAN STRATEGI
               menjadi PENYEBAB cross EMA_FAST/EMA_SLOW (default 4/10, dari
               close H1) searah level: Support -> GOLDEN CROSS, Resistance ->
               DEATH CROSS. Kalau tidak ada, level GUGUR.
+            - WARMUP: c1 harus di candle ke-EMA_WARMUP (default 50) ke atas
+              (EMA dihitung dari awal data, cross di candle awal bisa palsu).
+   Level baru dianggap SIAP begitu c3 closed DAN cross sudah terjadi (candle
+   terakhir dari keduanya closed) -- monitoring M5 mulai dari situ (tanpa lookahead).
 
-   WARMUP: c1 harus di candle ke-EMA_WARMUP (default 50) ke atas. EMA dihitung
-   dari awal data (ewm), jadi cross di candle-candle awal bisa palsu/belum stabil.
+2) MONITORING M5 (mulai setelah level siap; level tersentuh otomatis tercakup
+   karena body yang menembus level pasti menyentuhnya):
+   Support:
+     a) KELUAR : body M5 break DI BAWAH level  (close M5 < level).  Wick tidak dihitung.
+     b) MASUK  : setelah (a), body M5 break balik DI ATAS level (close M5 > level).
+     c) GUGUR  : setelah (a), kalau harga M5 turun sampai LEVEL_FAIL_PCT (2%)
+                 di bawah level (low <= level x 0.98) SEBELUM atau di candle yang
+                 sama dengan (b) -> level gugur, tidak ada entry.
+   Resistance: kebalikannya (KELUAR close M5 > level, MASUK close M5 < level,
+   GUGUR kalau high >= level x 1.02).
+   Level yang belum pernah break keluar tetap dipantau (tidak ada batas waktu).
 
-2) SENTUHAN LEVEL -- candle PERTAMA setelah c3 yang wick/body-nya MENYENTUH
-   ATAU MELEBIHI level (support: low <= level; resistance: high >= level).
-   Tersentuh persis di harga level juga VALID. Tidak ada syarat arah candle.
-   FILTER DORONGAN KUAT (USE_WICK_FILTER, default aktif): cari wick TERPANJANG
-   antara c1 dan c2 (support: wick bawah, resistance: wick atas); ujungnya =
-   wick_tip. Mulai candle sentuhan dan candle-candle sesudahnya (sampai candle
-   cross), kalau BODY candle (min(open,close) utk support, max utk resistance)
-   MELEWATI wick_tip -> level GAGAL. Kalau hanya WICK yang melewati -> boleh.
-
-3) EMA CROSS ULANG (mencari level SEBELUMNYA) -- pencarian dibalik: tiap
-   cross EMA4/EMA10 (Support -> GOLDEN CROSS, Resistance -> DEATH CROSS)
-   mengecek ke BELAKANG, adakah level searah yang SUDAH terbentuk dan SUDAH
-   tersentuh di candle SEBELUM candle cross (bukan candle cross itu sendiri),
-   dan belum dipakai. Kalau ada -> cross itu jadi sinyal. Kalau ada beberapa
-   level sekaligus, dipakai level TERBARU (c1 paling baru); semua level yg
-   menunggu cross itu dianggap terpakai, jadi 1 cross = maks 1 entry (tidak
-   ada limit kembar di harga yang sama). Level yang baru terbentuk/tersentuh
-   di/sesudah candle cross TIDAK ikut. Cross lama di c2-c4 tidak dihitung.
-   Kalau tidak ada level sebelumnya -> cross itu diabaikan.
-
-4) LEVEL BARU -- pada candle cross, cari level S/R BARU di ENTRY_LOOKBACK (4)
-   candle SEBELUM candle cross (jendela j-4..j-1). Pola sama dengan level awal:
-   c1+c2 berlawanan arah (c1,c2 di dalam jendela), level = close[c1], c3 bersih
-   (c3 boleh candle cross itu sendiri), TANPA syarat EMA (cross di j sudah
-   syaratnya). Bukan level lama yg tadi tersentuh, belum pernah dipakai, dan
-   close candle cross masih di sisi yg benar (Long: close > level; Short:
-   close < level). Kalau ada beberapa -> c1 paling baru. Tidak ada -> tidak
-   ada sinyal (cross itu terbuang, tidak dicoba ulang).
-
-5) ENTRY -- LIMIT di LEVEL BARU itu, dipasang begitu candle cross CLOSED
-   (tanpa lookahead). Baru RESMI AKTIF (armed) begitu harga masuk radius
-   APPROACH_PCT (default 2%) dari entry_price, lalu ditunggu sampai TERSENTUH.
-   Kalau harga menjauh >2%, disarm (balik waiting, tetap hidup). KADALUARSA:
-   EXPIRE_CANDLES candle H1 setelah candle cross closed tanpa fill -> gugur.
-   SL = tepat SL_PCT (1%) dari entry (Long: entry x 0.99, Short: entry x 1.01).
+3) ENTRY -- begitu (b) MASUK terjadi: MARKET order di CLOSE candle M5 itu.
+   Support -> Long, Resistance -> Short. SL = tepat SL_PCT (1%) dari entry
+   (Long: entry x 0.99, Short: entry x 1.01). Kalau slot/margin/min order tidak
+   cukup saat itu, setup hangus (market order tidak digantung).
    TRAILING STOP: aktif di TRAIL_ACTIVATE_R (2R), SL mengikuti TRAIL_STOP_R (1R)
    di belakang harga ekstrem (dipantau M5). Kalau di candle M5 yg sama harga
    menyentuh SL dan trailing sekaligus aktif/naik -> yg dihitung SL (SL dicek
-   duluan). Level MATI setelah 1x FILLED.
+   duluan). Level MATI setelah 1x entry.
 
 Deploy ke Railway:
   Start command -> python backtest_web.py
@@ -72,10 +55,10 @@ Deploy ke Railway:
 Periode default: 1 tahun ke belakang dari hari script dijalankan (bisa
 di-override lewat env BACKTEST_START_DATE / BACKTEST_END_DATE).
 
-trades.csv menyertakan waktu (WIB, UTC+7) level terbentuk, sentuhan level,
-cross, entry, dan exit -- kolom 'src_wick_tip' (ujung wick filter), 'src_level_formed_wib' (level lama), 'level_formed_wib' (level baru/entry), 'touch_wib',
-'cross_wib', 'entry_wib', 'exit_wib' -- selain versi epoch ms mentahnya.
-Kolom 'reason' berisi 'SL' atau 'TRAIL'.
+trades.csv menyertakan waktu (WIB, UTC+7) level terbentuk, M5 break keluar,
+entry, dan exit -- kolom 'level_formed_wib', 'out_wib', 'entry_wib',
+'exit_wib' -- selain versi epoch ms mentahnya. Kolom 'reason' berisi 'SL'
+atau 'TRAIL'.
 """
 
 import os, threading, time, io, csv
@@ -97,7 +80,7 @@ FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 SL_PCT           = float(os.environ.get('SL_PCT', '0.01'))           # SL tepat 1% dari entry (= 1R)
-APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', '0.02'))       # limit baru AKTIF (armed) kalau harga sudah dlm radius 2% dari entry_price
+LEVEL_FAIL_PCT   = float(os.environ.get('LEVEL_FAIL_PCT', '0.02'))   # setelah body M5 break KELUAR, kalau harga sampai 2% dari level -> level gugur
 TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 2R
 TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
 
@@ -191,7 +174,7 @@ _combined_result = {
     'n_trades': 0, 'n_win': 0, 'n_loss': 0, 'wr': 0, 'total_pnl': 0, 'roi': 0,
     'total_r': 0, 'avg_r': 0, 'final_balance': INITIAL_BALANCE,
     'blocked_by_slot': 0, 'blocked_by_margin': 0, 'blocked_by_min_order': 0, 'blocked_by_invalid_sl': 0,
-    'expired_count': 0,
+    'failed_count': 0,
 }
 
 
@@ -295,44 +278,34 @@ def fetch_bybit_m5(symbol: str) -> pd.DataFrame:
 EMA_FAST = int(os.environ.get('EMA_FAST', 4))
 EMA_SLOW = int(os.environ.get('EMA_SLOW', 10))
 EMA_WARMUP = int(os.environ.get('EMA_WARMUP', 50))   # c1 level harus di candle ke-N ke atas (EMA awal data belum stabil, cross di awal bisa palsu)
-USE_WICK_FILTER = os.environ.get('USE_WICK_FILTER', '1').lower() not in ('0', 'false', 'no')   # filter 'dorongan kuat': body tidak boleh melewati ujung wick terpanjang c1/c2 setelah level tersentuh
-ENTRY_LOOKBACK = int(os.environ.get('ENTRY_LOOKBACK', 4))   # saat EMA cross terjadi, cari level S/R BARU di N candle H1 sebelum candle cross
 N_RIGHT = 1   # jumlah candle kanan yang harus bersih (tidak menyentuh wick) -- cukup c3 saja
-EXPIRE_CANDLES = 4   # limit kadaluarsa kalau tak tersentuh dlm N candle H1 setelah candle cross closed
 
 def _compute_emas(c):
-    """EMA_FAST & EMA_SLOW dari array close (dipakai find_levels & detect_snr_events)."""
+    """EMA_FAST & EMA_SLOW dari array close (dipakai find_levels)."""
     ema_fast = pd.Series(c).ewm(span=EMA_FAST, adjust=False).mean().values
     ema_slow = pd.Series(c).ewm(span=EMA_SLOW, adjust=False).mean().values
     return ema_fast, ema_slow
 
 def find_levels(df):
     """Deteksi level Support & Resistance dari candle H1 (basis body candle).
-    TANPA syarat kiri lagi -- cukup c3 (candle tepat setelah c1,c2) yang
-    wick-nya tidak boleh menyentuh level.
     Syarat kanan: N_RIGHT candle SETELAH c1,c2 (c3) -- WICK-nya (bukan cuma
                   body) tidak boleh menyentuh level sama sekali.
-    TIDAK ADA syarat wick lagi -- c1/c2 boleh sama sekali tidak punya wick
-                  (wick selevel dengan ujung body juga tidak masalah).
+    c1/c2 boleh sama sekali tidak punya wick.
     Syarat EMA CROSS di RENTANG c2-c4 (EMA_FAST/EMA_SLOW, default 4/10 dari
                   close H1): cukup SALAH SATU dari candle c2, c3, ATAU c4
-                  yang menjadi penyebab cross yang searah dengan arah level
-                  (tidak harus persis di c2 lagi):
+                  yang menjadi penyebab cross yang searah dengan arah level:
                   - Support -> GOLDEN CROSS di c2/c3/c4 (EMA4 dari <= EMA10
                     di candle sebelumnya, jadi > EMA10 di candle itu).
                   - Resistance -> DEATH CROSS di c2/c3/c4 (EMA4 dari >=
                     EMA10 di candle sebelumnya, jadi < EMA10 di candle itu).
                   Kalau tidak ada satupun cross yang sesuai di c2-c4, level
                   GUGUR.
-    'patokan' = LEVEL itu sendiri (ujung body candle c1, close[c1]) --
-                  dipakai sebagai acuan sentuhan level (lihat detect_snr_events).
-                  Sama persis dengan 'level'.
-    'level' = body candle c1 (close[c1]) -- dipakai untuk syarat validitas
-                  candle c3 (wick tidak boleh menyentuh level ini).
-    'wick_tip' = ujung wick TERPANJANG antara c1 dan c2 (support: low wick bawah
-                  terpanjang; resistance: high wick atas terpanjang) -- dipakai filter
-                  'dorongan kuat' di detect_snr_events.
-    Return list dict: {'type', 'level', 'patokan', 'wick_tip', 'c1', 'c2', 'c_right'}."""
+    c1 hanya dihitung mulai candle ke-EMA_WARMUP (EMA awal data belum stabil).
+    'level' = close[c1].
+    'confirm_i' = index candle H1 TERAKHIR yang dibutuhkan untuk memastikan level
+                  valid = max(c3, cross paling awal di c2-c4). Level baru siap
+                  (tanpa lookahead) begitu candle ini closed.
+    Return list dict: {'type', 'level', 'c1', 'c2', 'c_right', 'confirm_i'}."""
     o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
     n = len(df)
     ema_fast, ema_slow = _compute_emas(c)
@@ -345,28 +318,22 @@ def find_levels(df):
 
     levels = []
     for i in range(EMA_WARMUP, n - 3):   # skip candle warmup EMA; perlu c1,c2,c3,c4 (i..i+3) semua ada di dalam data
-        golden_cross_c2_c4 = any(golden_cross_at(j) for j in (i + 1, i + 2, i + 3))
-        death_cross_c2_c4  = any(death_cross_at(j) for j in (i + 1, i + 2, i + 3))
+        golden_js = [j for j in (i + 1, i + 2, i + 3) if golden_cross_at(j)]
+        death_js  = [j for j in (i + 1, i + 2, i + 3) if death_cross_at(j)]
         if c[i] < o[i] and c[i + 1] > o[i + 1]:          # bearish lalu bullish -> support
             S = c[i]
             right_ok = all(l[i + 2 + k] > S + 1e-9 for k in range(N_RIGHT))
-            if right_ok and golden_cross_c2_c4:
-                # wick BAWAH terpanjang antara c1 dan c2 -> ujungnya (low) = wick_tip
-                w1 = min(o[i], c[i]) - l[i]
-                w2 = min(o[i + 1], c[i + 1]) - l[i + 1]
-                tip = l[i] if w1 >= w2 else l[i + 1]
-                levels.append({'type': 'support', 'level': S, 'patokan': S, 'wick_tip': float(tip),
-                                'c1': i, 'c2': i + 1, 'c_right': [i + 2 + k for k in range(N_RIGHT)]})
+            if right_ok and golden_js:
+                c_right = [i + 2 + k for k in range(N_RIGHT)]
+                levels.append({'type': 'support', 'level': float(S), 'c1': i, 'c2': i + 1,
+                               'c_right': c_right, 'confirm_i': max(c_right[-1], min(golden_js))})
         if c[i] > o[i] and c[i + 1] < o[i + 1]:          # bullish lalu bearish -> resistance
             R = c[i]
             right_ok = all(h[i + 2 + k] < R - 1e-9 for k in range(N_RIGHT))
-            if right_ok and death_cross_c2_c4:
-                # wick ATAS terpanjang antara c1 dan c2 -> ujungnya (high) = wick_tip
-                w1 = h[i] - max(o[i], c[i])
-                w2 = h[i + 1] - max(o[i + 1], c[i + 1])
-                tip = h[i] if w1 >= w2 else h[i + 1]
-                levels.append({'type': 'resistance', 'level': R, 'patokan': R, 'wick_tip': float(tip),
-                                'c1': i, 'c2': i + 1, 'c_right': [i + 2 + k for k in range(N_RIGHT)]})
+            if right_ok and death_js:
+                c_right = [i + 2 + k for k in range(N_RIGHT)]
+                levels.append({'type': 'resistance', 'level': float(R), 'c1': i, 'c2': i + 1,
+                               'c_right': c_right, 'confirm_i': max(c_right[-1], min(death_js))})
     return levels
 
 
@@ -387,181 +354,113 @@ def find_levels(df):
 # candle tidak bisa jadi TEST dan BREAK sekaligus, jadi otomatis break selalu
 # candle yang berbeda dan setelah test pertama).
 
-def _find_entry_level(o, h, l, c, j, ty, exclude_c1, used):
-    """Cari level S/R BARU di ENTRY_LOOKBACK candle SEBELUM candle cross j.
-    Jendela = candle j-ENTRY_LOOKBACK .. j-1. c1 dan c2 harus di dalam jendela;
-    c3 (candle bersih) boleh = candle cross j itu sendiri (sudah closed).
-    Pola sama dengan find_levels, TANPA syarat EMA cross (cross di j-lah syaratnya):
-      support    : c1 bearish lalu c2 bullish, level = close[c1], low c3 > level
-      resistance : c1 bullish lalu c2 bearish, level = close[c1], high c3 < level
-    Tambahan: level BUKAN level lama yg tadi tersentuh (exclude_c1), belum pernah
-    dipakai (used), dan harga close candle cross masih di sisi yg benar (Long: close
-    > level; Short: close < level) supaya limit tidak berada di sisi pasar yg salah.
-    Kalau ada beberapa, dipakai c1 paling baru. Return (c1_index, level) atau None."""
-    found = None
-    for i in range(j - ENTRY_LOOKBACK, j - 1):
-        if i < 0 or i == exclude_c1 or (ty, i) in used:
-            continue
-        if i + 1 + N_RIGHT > j:
-            continue
-        if ty == 'support':
-            if not (c[i] < o[i] and c[i + 1] > o[i + 1]):
-                continue
-            S = c[i]
-            if all(l[i + 2 + k] > S + 1e-9 for k in range(N_RIGHT)) and c[j] > S:
-                found = (i, float(S))
-        else:
-            if not (c[i] > o[i] and c[i + 1] < o[i + 1]):
-                continue
-            R = c[i]
-            if all(h[i + 2 + k] < R - 1e-9 for k in range(N_RIGHT)) and c[j] < R:
-                found = (i, float(R))
-    return found
+def _m5_break_entry(m5, ty, level, start_ts):
+    """Monitoring M5 satu level mulai start_ts (tanpa lookahead, semua pakai close candle).
+    Support : KELUAR = close < level; MASUK = close > level (setelah keluar);
+              GUGUR = low <= level x (1 - LEVEL_FAIL_PCT) (setelah/di candle keluar).
+    Resistance: kebalikannya (KELUAR close > level, MASUK close < level,
+              GUGUR high >= level x (1 + LEVEL_FAIL_PCT)).
+    Gugur di candle yang sama dgn MASUK dihitung gugur (konservatif).
+    Return (status, k_out, m_in):
+      'none'    -- belum pernah break keluar
+      'waiting' -- sudah keluar, belum masuk & belum gugur
+      'failed'  -- gugur sebelum masuk
+      'entry'   -- masuk di index m_in (k_out = index candle keluar)"""
+    TS, H, L, C = m5['TS'], m5['H'], m5['L'], m5['C']
+    n5 = len(TS)
+    s0 = int(np.searchsorted(TS, start_ts, side='left'))
+    if s0 >= n5:
+        return 'none', None, None
+    if ty == 'support':
+        out_mask = C[s0:] < level
+    else:
+        out_mask = C[s0:] > level
+    if not out_mask.any():
+        return 'none', None, None
+    k = s0 + int(out_mask.argmax())
+
+    if ty == 'support':
+        fail_mask = L[k:] <= level * (1 - LEVEL_FAIL_PCT)
+        in_mask = C[k + 1:] > level
+    else:
+        fail_mask = H[k:] >= level * (1 + LEVEL_FAIL_PCT)
+        in_mask = C[k + 1:] < level
+    g = (k + int(fail_mask.argmax())) if fail_mask.any() else None
+    m = (k + 1 + int(in_mask.argmax())) if in_mask.any() else None
+    if m is None:
+        return ('failed' if g is not None else 'waiting'), k, None
+    if g is not None and g <= m:
+        return 'failed', k, None
+    return 'entry', k, m
 
 
-def detect_snr_events(df):
-    """Level Support & Resistance -> tersentuh -> EMA cross searah -> cari level
-    BARU di ENTRY_LOOKBACK candle sebelum cross. Entry = LIMIT di level baru itu.
+def detect_snr_events(df, m5):
+    """Level Support & Resistance AWAL (find_levels) -> monitoring M5 -> entry MARKET.
 
-    Urutan:
-    1) Level terbentuk (find_levels): c1+c2, c3 bersih, EMA cross searah di
-       c2-c4, c1 >= EMA_WARMUP. 'patokan' = 'level' (close c1). Ini level LAMA.
-    2) SENTUHAN per level lama: candle PERTAMA setelah c3 yang menyentuh/melebihi
-       level (support: low <= level; resistance: high >= level). FILTER: kalau body
-       candle sentuhan atau candle sesudahnya (s/d candle cross) melewati wick_tip
-       (ujung wick terpanjang c1/c2) -> level gagal (hanya wick melewati: boleh).
-    3) Tiap EMA cross di candle j (golden -> support, death -> resistance) mengecek
-       ke BELAKANG: ada level lama searah yg touch_i < j dan belum dipakai? Ada ->
-       level lama dipilih = c1 paling baru, semua level lama yg menunggu cross ini
-       ditandai terpakai (1 cross = maks 1 event, cross ini tidak dicoba ulang).
-    4) CARI LEVEL BARU di ENTRY_LOOKBACK (4) candle sebelum candle cross
-       (_find_entry_level). Tidak ada -> tidak ada sinyal.
-    5) ENTRY: LIMIT di level baru itu (close c1 level baru), dipasang begitu
-       candle cross CLOSED. Armed dlm radius APPROACH_PCT, expire EXPIRE_CANDLES
-       candle H1. SL tepat SL_PCT (1%) dari entry.
+    Per level: mulai dari candle M5 pertama setelah level siap (candle confirm_i
+    closed), cari body M5 KELUAR lalu body M5 MASUK (lihat _m5_break_entry).
+    Begitu MASUK: entry market di CLOSE candle M5 itu, SL tepat SL_PCT (1%).
+    Gugur kalau setelah keluar harga sampai LEVEL_FAIL_PCT (2%) dari level.
 
-    Return list dict:
-    {'kind', 'type', 'level' (= level BARU/entry), 'patokan', 'direction',
-     'entry_price', 'sl_price', 'ready_ts', 'expire_ts', 'touch_ts', 'cross_ts',
-     'confirm_ts', 'c1_ts', 'c1', 'c2', 'src_level', 'src_c1_ts'}
-    """
-    o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
+    Return (events, stats):
+    events: list dict {'kind', 'type', 'level', 'direction', 'entry_price',
+            'sl_price', 'fill_ts' (open ts candle M5 saat MASUK), 'out_ts',
+            'confirm_ts', 'c1_ts', 'c1', 'c2'} urut fill_ts
+    stats : {'levels', 'entry', 'failed', 'pending'}"""
     ts = df['ts'].values
-    n = len(df)
-    WICK_EPS = 1e-9
-    ema_fast, ema_slow = _compute_emas(c)
-
-    # 1+2) level terbentuk + candle sentuhan pertamanya
-    cands = []
-    for lv in find_levels(df):
-        ty = lv['type']
-        patokan = lv['patokan']
-        last_right_i = lv['c_right'][-1]   # c3 -- confirm
-        touch_i = None
-        for k in range(last_right_i + 1, n):
-            if ty == 'support':
-                touch = l[k] <= patokan + WICK_EPS
-            else:
-                touch = h[k] >= patokan - WICK_EPS
-            if touch:
-                touch_i = k
-                break
-        if touch_i is None:
-            continue   # belum pernah tersentuh sampai akhir data
-
-        # FILTER dorongan kuat: dari candle sentuhan dst, kalau BODY (bukan wick)
-        # melewati ujung wick terpanjang c1/c2 -> level GAGAL di candle itu.
-        # Hanya wick yang melewati ujung -> boleh.
-        fail_i = None
-        if USE_WICK_FILTER:
-            tip = lv['wick_tip']
-            for k in range(touch_i, n):
-                if ty == 'support':
-                    broke = min(o[k], c[k]) < tip - WICK_EPS
-                else:
-                    broke = max(o[k], c[k]) > tip + WICK_EPS
-                if broke:
-                    fail_i = k
-                    break
-        cands.append({'lv': lv, 'ty': ty, 'touch_i': touch_i, 'fail_i': fail_i,
-                      'last_right_i': last_right_i, 'used': False})
-
-    # 3) tiap EMA cross mencari level SEBELUMNYA (touch_i < j, belum dipakai)
+    levels = find_levels(df)
+    stats = {'levels': len(levels), 'entry': 0, 'failed': 0, 'pending': 0}
     events = []
-    used_entry = set()   # (type, c1) level baru yg sudah dipakai jadi entry
-    for j in range(1, n):
-        if ema_fast[j - 1] <= ema_slow[j - 1] and ema_fast[j] > ema_slow[j]:
-            ty = 'support'      # golden cross
-        elif ema_fast[j - 1] >= ema_slow[j - 1] and ema_fast[j] < ema_slow[j]:
-            ty = 'resistance'   # death cross
-        else:
+    if m5 is None:
+        stats['pending'] = len(levels)
+        return events, stats
+
+    for lv in levels:
+        ty = lv['type']
+        level = lv['level']
+        start_ts = int(ts[lv['confirm_i']]) + 3600 * 1000   # candle confirm closed
+        status, k, m = _m5_break_entry(m5, ty, level, start_ts)
+        if status == 'failed':
+            stats['failed'] += 1
             continue
-        # level gagal kalau body menembus ujung wick di candle sentuhan..j (j inklusif)
-        pool = [cd for cd in cands if cd['ty'] == ty and not cd['used'] and cd['touch_i'] < j
-                and (cd['fail_i'] is None or cd['fail_i'] > j)]
-        if not pool:
-            continue   # tidak ada level sebelumnya -> cross diabaikan
-        chosen = max(pool, key=lambda cd: (cd['lv']['c1'], cd['touch_i']))
-        for cd in pool:
-            cd['used'] = True
-        lv = chosen['lv']   # level LAMA (yg tadi tersentuh)
+        if status != 'entry':
+            stats['pending'] += 1
+            continue
+        stats['entry'] += 1
 
-        # 4) cari level BARU di ENTRY_LOOKBACK candle sebelum candle cross
-        found = _find_entry_level(o, h, l, c, j, ty, lv['c1'], used_entry)
-        if found is None:
-            continue   # tidak ada level baru di jendela -> cross ini terbuang
-        e_c1, e_level = found
-        used_entry.add((ty, e_c1))
-
-        kind = 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE'
         direction = 'Long' if ty == 'support' else 'Short'
-
-        # Entry: LIMIT di level baru. SL: tepat SL_PCT dari entry.
-        entry_price = e_level
-        if direction == 'Long':
-            sl_price = entry_price * (1 - SL_PCT)
-        else:
-            sl_price = entry_price * (1 + SL_PCT)
-
-        # ready_ts = saat candle cross CLOSED (open + 1 jam - 1ms) -> limit baru
-        # dipasang setelahnya (tanpa lookahead, EMA dihitung dari close).
-        ready_ts = int(ts[j]) + 3600 * 1000 - 1
-        expire_ts = ready_ts + EXPIRE_CANDLES * 3600 * 1000
+        entry_price = float(m5['C'][m])   # market fill di close candle M5 MASUK
+        sl_price = entry_price * (1 - SL_PCT) if direction == 'Long' else entry_price * (1 + SL_PCT)
         events.append({
-            'kind': kind, 'type': ty, 'level': e_level, 'patokan': e_level,
-            'direction': direction,
-            'entry_price': entry_price, 'sl_price': sl_price, 'ready_ts': ready_ts,
-            'touch_ts': int(ts[chosen['touch_i']]),
-            'cross_ts': int(ts[j]),
-            'confirm_ts': int(ts[e_c1 + 1 + N_RIGHT]),
-            'c1_ts': int(ts[e_c1]),
-            'expire_ts': expire_ts,
-            'c1': e_c1, 'c2': e_c1 + 1,
-            'src_level': lv['level'], 'src_c1_ts': int(ts[lv['c1']]), 'src_wick_tip': float(lv['wick_tip']),
+            'kind': 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE',
+            'type': ty, 'level': level, 'direction': direction,
+            'entry_price': entry_price, 'sl_price': sl_price,
+            'fill_ts': int(m5['TS'][m]),
+            'out_ts': int(m5['TS'][k]),
+            'confirm_ts': int(ts[lv['confirm_i']]),
+            'c1_ts': int(ts[lv['c1']]),
+            'c1': lv['c1'], 'c2': lv['c2'],
         })
 
-    events.sort(key=lambda e: e['ready_ts'])
-    return events
+    events.sort(key=lambda e: e['fill_ts'])
+    return events, stats
 
 
-def detect_all_events(df):
-    """Support & Resistance + sentuhan + EMA cross + level baru -- SNR_SUPPORT (Long)
-    dan SNR_RESISTANCE (Short). Dedup: 2 event dgn (kind, level, ready_ts)
-    SAMA PERSIS dianggap 1 sinyal yg sama -- ambil salah satu saja."""
-    events = detect_snr_events(df)
+def detect_all_events(df, m5):
+    """Support & Resistance + monitoring M5 -- SNR_SUPPORT (Long) dan
+    SNR_RESISTANCE (Short). Dedup: 2 event dgn (kind, level, fill_ts) SAMA
+    PERSIS dianggap 1 sinyal yg sama. Return (events, stats)."""
+    events, stats = detect_snr_events(df, m5)
     seen = set()
     deduped = []
     for e in events:
-        dedup_key = (e['kind'], round(e['level'], 10), e['ready_ts'])
+        dedup_key = (e['kind'], round(e['level'], 10), e['fill_ts'])
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
         deduped.append(e)
-    deduped.sort(key=lambda e: e['ready_ts'])
-    return deduped
-
-
-
+    deduped.sort(key=lambda e: e['fill_ts'])
+    return deduped, stats
 
 
 # ============================================================
@@ -583,13 +482,14 @@ def prepare_m5(df_m5):
 # PERSIAPAN PER-KOIN
 # ============================================================
 
-def prepare_coin(symbol, df):
+def prepare_coin(symbol, df, m5):
     df = df.sort_values('ts').reset_index(drop=True)
-    events = detect_all_events(df)
+    events, stats = detect_all_events(df, m5)
     return {
         'symbol': symbol,
         'TS': df['ts'].values.astype(np.int64),
-        'events': events,   # list SBR, urut by confirm_ts
+        'events': events,   # list entry market (sudah lewat break keluar -> masuk), urut fill_ts
+        'stats': stats,
         'n': len(df),
     }
 
@@ -598,12 +498,10 @@ def prepare_coin(symbol, df):
 # SIMULASI GABUNGAN (semua koin, 1 balance, 1 pool slot)
 # ============================================================
 #
-# Tiap event dari detect_all_events() SUDAH final (level tersentuh + EMA cross
-# ulang sudah terjadi + level baru ditemukan, entry_price = level baru itu) --
-# begitu waktu (M5) sampai di ready_ts event itu (candle cross closed), limit order
-# "dipasang" (GTC), lalu dipantau tiap candle M5 sampai TERSENTUH baru
-# open_trade. Kalau slot/margin/min order tidak cukup PAS saat tersentuh,
-# limit TETAP GTC (tidak batal), dicoba lagi kalau tersentuh lagi nanti.
+# Tiap event dari detect_all_events() SUDAH final: level sudah break keluar lalu
+# MASUK di M5 (entry_price = close candle M5 MASUK, fill market). Simulasi
+# cukup membuka posisi saat waktu (M5) sampai di fill_ts event itu. Kalau
+# slot/margin/min order tidak cukup, setup hangus (market order tidak digantung).
 
 def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
     balance = INITIAL_BALANCE
@@ -620,17 +518,11 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
 
     positions_by_symbol = {}   # symbol -> set(keys)
 
-    # pending_activation: event yg ready_ts-nya BELUM lewat, urut asc per simbol.
-    # Begitu ready_ts lewat -> limit MASUK STATUS 'waiting' (live_levels_by_symbol),
-    # dipantau tiap candle M5: harga masuk radius APPROACH_PCT -> ARMED, lalu ditunggu
-    # sampai TERSENTUH (open_trade).
-    pending_activation = {}
-    live_levels_by_symbol = {symbol: [] for symbol in coins}
-    # level_state: (symbol, idx) -> {'status': 'waiting'/'armed', 'entry_price', 'expire_ts'}
-    level_state = {}
-    for symbol, cp in coins.items():
-        pending_activation[symbol] = sorted(
-            [(ev['ready_ts'], idx) for idx, ev in enumerate(cp['events'])])
+    # pending_fills: event market entry (M5 body sudah break MASUK di fill_ts), urut asc per simbol.
+    pending_fills = {
+        symbol: sorted([(ev['fill_ts'], idx) for idx, ev in enumerate(cp['events'])])
+        for symbol, cp in coins.items()
+    }
 
     def open_trade(symbol, ev, entry_price, entry_ts):
         nonlocal balance, total_margin_used
@@ -656,9 +548,8 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         active_positions[key] = {
             'symbol': symbol, 'direction': direction, 'entry': entry_price, 'sl': sl,
             'dist': dist, 'qty': qty, 'entry_ts': entry_ts, 'level': ev['level'],
-            'kind': ev['kind'], 'margin': margin_needed, 'confirm_ts': ev['confirm_ts'],
-            'c1_ts': ev['c1_ts'], 'touch_ts': ev['touch_ts'], 'cross_ts': ev['cross_ts'],
-            'src_c1_ts': ev['src_c1_ts'], 'src_level': ev['src_level'], 'src_wick_tip': ev['src_wick_tip'],
+            'kind': ev['kind'], 'margin': margin_needed,
+            'c1_ts': ev['c1_ts'], 'out_ts': ev['out_ts'],
             'trail_active': False, 'extreme': entry_price,   # high/low-water mark, mulai dari entry
         }
         total_margin_used += margin_needed
@@ -683,14 +574,8 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'level': pos['level'], 'kind': pos['kind'],
             'level_formed_ts': pos['c1_ts'],
             'level_formed_wib': _fmt_wib(pos['c1_ts']),
-            'src_level': pos['src_level'],
-            'src_wick_tip': pos['src_wick_tip'],
-            'src_level_formed_ts': pos['src_c1_ts'],
-            'src_level_formed_wib': _fmt_wib(pos['src_c1_ts']),
-            'touch_ts': pos['touch_ts'],
-            'touch_wib': _fmt_wib(pos['touch_ts']),
-            'cross_ts': pos['cross_ts'],
-            'cross_wib': _fmt_wib(pos['cross_ts']),
+            'out_ts': pos['out_ts'],
+            'out_wib': _fmt_wib(pos['out_ts']),
             'entry_wib': _fmt_wib(pos['entry_ts']),
             'exit_wib': _fmt_wib(exit_ts),
         })
@@ -748,44 +633,19 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
                             if hi >= pos['sl'] - 1e-12:
                                 close_trade(key, pos['sl'], 'TRAIL', now_ts)
 
-        # 2) limit live simbol ini: waiting (belum dlm radius 2%) -> armed
-        #    (sudah dlm radius 2%, limit resmi terpasang) -> tersentuh (fill).
-        #    Entry = level S/R BARU (dicari sebelum cross). KADALUARSA: now_ts >=
-        #    expire_ts dan belum tersentuh -> setup gugur, dibuang.
-        cp = coins[symbol]
-        live_idxs = live_levels_by_symbol.get(symbol)
-        if live_idxs:
-            still_live = []
-            for idx in live_idxs:
-                ev = cp['events'][idx]
-                st = level_state[(symbol, idx)]
+        # 2) event market entry simbol ini: body M5 sudah break MASUK di candle ini
+        #    (harga entry = close candle ini). Slot/margin/min order tidak cukup ->
+        #    setup hangus (market order tidak digantung). Posisi baru dicek SL/trailing
+        #    mulai candle M5 BERIKUTNYA.
+        plist = pending_fills.get(symbol)
+        while plist and plist[0][0] <= now_ts:
+            _, idx = plist.pop(0)
+            ev = coins[symbol]['events'][idx]
+            opened_key, block_reason = open_trade(symbol, ev, ev['entry_price'], now_ts + 5 * 60 * 1000)
+            if opened_key is None:
+                nonlocal_blocks[block_reason] += 1
 
-                expire_ts = st['expire_ts']
-                if expire_ts is not None and now_ts >= expire_ts:
-                    nonlocal_blocks['expired'] += 1
-                    continue   # kadaluarsa -> dibuang, tidak pernah dicoba lagi
-                entry_price = st['entry_price']
-                dist_pct = abs(close_p - entry_price) / entry_price
-                touched = (lo <= entry_price <= hi)
-                if st['status'] == 'waiting':
-                    if dist_pct <= APPROACH_PCT:
-                        st['status'] = 'armed'
-                    still_live.append(idx)
-                else:   # armed
-                    if touched:
-                        opened_key, block_reason = open_trade(symbol, ev, entry_price, now_ts)
-                        if opened_key is None:
-                            nonlocal_blocks[block_reason] += 1
-                            # gagal dibuka (slot/margin/min_order) -> limit tetap
-                            # GTC (armed), coba lagi kalau tersentuh lagi nanti
-                            still_live.append(idx)
-                    else:
-                        if dist_pct > APPROACH_PCT:
-                            st['status'] = 'waiting'   # menjauh lagi -> disarm
-                        still_live.append(idx)
-            live_levels_by_symbol[symbol] = still_live
-
-    nonlocal_blocks = {'slot': 0, 'margin': 0, 'min_order': 0, 'invalid_sl': 0, 'expired': 0}
+    nonlocal_blocks = {'slot': 0, 'margin': 0, 'min_order': 0, 'invalid_sl': 0}
 
     # ── TIMELINE EFISIEN via K-WAY MERGE (pointer index, bukan searchsorted) ──
     # Tiap simbol punya pointer int ke posisi candle M5 berikutnya yg BELUM
@@ -817,8 +677,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
     for symbol, cp in coins.items():
         if not cp['events'] or symbol not in m5_ts_arr:
             continue
-        first_ready_ts = cp['events'][0]['ready_ts']
-        _advance_ptr_to(symbol, first_ready_ts + 1)
+        _advance_ptr_to(symbol, pending_fills[symbol][0][0])   # candle M5 fill pertama
         if ptr[symbol] < m5_len[symbol]:
             heapq.heappush(heap, (int(m5_ts_arr[symbol][ptr[symbol]]), symbol))
 
@@ -828,32 +687,17 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         if i >= m5_len[symbol] or m5_ts_arr[symbol][i] != now_ts:
             continue   # stale entry (seharusnya tidak terjadi, safety check)
 
-        # begitu waktu (M5) sudah lewat ready_ts sebuah event (candle cross closed) -> limit mulai dipantau
-        # (status 'waiting' -- belum dlm radius APPROACH_PCT dari entry_price)
-        plist = pending_activation.get(symbol)
-        if plist:
-            while plist and plist[0][0] < now_ts:
-                _, idx = plist.pop(0)
-                ev = coins[symbol]['events'][idx]
-                level_state[(symbol, idx)] = {
-                    'status': 'waiting', 'entry_price': ev['entry_price'],
-                    'expire_ts': ev['expire_ts'],
-                }
-                live_levels_by_symbol[symbol].append(idx)
-
         process_symbol_tick(symbol, i)
 
-        # advance pointer: kalau simbol masih punya posisi aktif ATAU limit live
-        # yg belum tersentuh (butuh dipantau tiap candle), lanjut candle
-        # BERIKUTNYA (i+1, O(1)). Kalau tidak ada apa-apa, lompat jauh ke
-        # ready_ts event pending berikutnya (hemat banyak tick).
-        has_active = bool(positions_by_symbol.get(symbol)) or bool(live_levels_by_symbol.get(symbol))
-        if has_active:
+        # advance pointer: kalau simbol masih punya posisi aktif (butuh dipantau tiap
+        # candle), lanjut candle BERIKUTNYA (i+1, O(1)). Kalau tidak, lompat ke candle
+        # fill event pending berikutnya (hemat banyak tick).
+        if positions_by_symbol.get(symbol):
             ptr[symbol] = i + 1
         else:
-            plist = pending_activation.get(symbol)
+            plist = pending_fills.get(symbol)
             if plist:
-                _advance_ptr_to(symbol, plist[0][0] + 1)
+                _advance_ptr_to(symbol, plist[0][0])
             else:
                 ptr[symbol] = m5_len[symbol]   # tidak ada event pending lagi -> selesai
 
@@ -864,7 +708,6 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
     blocked_by_margin = nonlocal_blocks['margin']
     blocked_by_min_order = nonlocal_blocks['min_order']
     blocked_by_invalid_sl = nonlocal_blocks['invalid_sl']
-    expired_count = nonlocal_blocks['expired']
 
     n_trades = len(trades)
     n_win = sum(1 for t in trades if t['pnl_usd'] > 0)
@@ -881,7 +724,6 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         'final_balance': balance, 'roi': roi,
         'blocked_by_slot': blocked_by_slot, 'blocked_by_margin': blocked_by_margin,
         'blocked_by_min_order': blocked_by_min_order, 'blocked_by_invalid_sl': blocked_by_invalid_sl,
-        'expired_count': expired_count,
     }
 
 
@@ -1001,8 +843,8 @@ def _run():
     global _monthly_results, _avg_monthly_growth
     try:
         _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + EMA{EMA_FAST}/{EMA_SLOW} cross) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
-        _log_msg(f"   Syarat: level c1-c2 + cross awal di c2/c3/c4 -> tunggu level TERSENTUH -> tunggu EMA{EMA_FAST}/{EMA_SLOW} cross searah LAGI  "
-                  f"filter wick={'ON' if USE_WICK_FILTER else 'OFF'}  -> cari level S/R BARU di {ENTRY_LOOKBACK} candle sebelum cross  Entry=LIMIT di level baru itu (armed dlm radius {APPROACH_PCT*100:.1f}%)  "
+        _log_msg(f"   Syarat: level awal c1-c2 + cross di c2/c3/c4 -> monitoring M5: body M5 KELUAR level lalu body M5 MASUK -> ENTRY MARKET di close  "
+                  f"(gugur kalau setelah keluar harga {LEVEL_FAIL_PCT*100:.1f}% dari level)  "
                   f"SL={SL_PCT*100:.2f}% dari entry  "
                   f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
 
@@ -1016,17 +858,20 @@ def _run():
                 continue
             _log_msg(f"📊 {symbol}: fetch M5...")
             df_m5 = fetch_bybit_m5(symbol)
-            cp = prepare_coin(symbol, df_h1)
-            coins[symbol] = cp
             m5_data[symbol] = prepare_m5(df_m5)
+            cp = prepare_coin(symbol, df_h1, m5_data[symbol])
+            coins[symbol] = cp
             n_by_kind = {}
             for ev in cp['events']:
                 n_by_kind[ev['kind']] = n_by_kind.get(ev['kind'], 0) + 1
             kind_str = ', '.join(f"{k}:{v}" for k, v in sorted(n_by_kind.items()))
-            _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {len(cp['events'])} level terdeteksi ({kind_str}).")
+            st = cp['stats']
+            _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['entry']} entry M5 ({kind_str or '-'}), "
+                      f"{st['failed']} gugur (>{LEVEL_FAIL_PCT*100:.0f}%), {st['pending']} belum entry.")
 
         _log_msg(f"🧮 Menjalankan simulasi gabungan ({len(coins)} koin)...")
         result = run_combined_backtest(coins, m5_data)
+        failed_total = sum(cp['stats']['failed'] for cp in coins.values())
 
         _log_msg(f"🧮 Menjalankan simulasi PER-KOIN (independen, {len(coins)} koin)...")
         per_coin_raw = run_per_coin_backtests(coins, m5_data)
@@ -1050,7 +895,7 @@ def _run():
                 'blocked_by_margin': result['blocked_by_margin'],
                 'blocked_by_min_order': result['blocked_by_min_order'],
                 'blocked_by_invalid_sl': result['blocked_by_invalid_sl'],
-                'expired_count': result['expired_count'],
+                'failed_count': failed_total,
             })
             _results[:] = per_symbol_breakdown(result['trades'])
             _kind_results[:] = per_kind_breakdown(result['trades'])
@@ -1177,37 +1022,27 @@ def _render_html() -> bytes:
   </div>
 
   <div class="note">
-    💡 <b>Support & Resistance + sentuhan + EMA cross ulang</b>, basis body candle H1:
-    <br>• Level terbentuk dari c1+c2 (2 candle berlawanan arah), c3 bersih (wick tidak boleh
+    💡 <b>Support & Resistance awal + monitoring M5</b>, basis body candle:
+    <br>• Level terbentuk dari c1+c2 (2 candle berlawanan arah, H1), c3 bersih (wick tidak boleh
     menyentuh level), dan salah satu dari c2/c3/c4 wajib jadi PENYEBAB cross
     EMA{EMA_FAST}/EMA{EMA_SLOW} searah (Support → GOLDEN CROSS, Resistance → DEATH CROSS).
-    <br>• <b>Sentuhan</b>: candle PERTAMA setelah c3 yang wick/body-nya menyentuh ATAU melebihi
-    level (persis di level juga valid). Tidak ada syarat arah candle.
-    <br>• <b>Filter dorongan kuat</b>: ujung wick TERPANJANG antara c1 dan c2 (wick bawah utk Support,
-    wick atas utk Resistance) jadi batas. Mulai candle sentuhan sampai candle cross, kalau <b>body</b>
-    candle melewati ujung wick itu → level gagal. Kalau hanya <b>wick</b> yang melewati → boleh.
-    <br>• <b>Cross ulang</b>: tiap EMA{EMA_FAST}/EMA{EMA_SLOW} cross searah (golden untuk Support, death untuk
-    Resistance) mengecek ke BELAKANG: ada level searah yang sudah terbentuk &amp; sudah tersentuh di candle
-    sebelum cross, dan belum dipakai? Ada → sinyal (dipakai level terbaru, 1 cross = maks 1 entry).
-    <br>• <b>Level baru</b>: pada candle cross, cari support (golden) / resistance (death) BARU di
-    <b>{ENTRY_LOOKBACK}</b> candle H1 sebelum candle cross (pola c1+c2, c3 bersih, tanpa syarat EMA;
-    bukan level lama yang tadi tersentuh). Tidak ada → sinyal tidak ada.
-    <br>• <b>ENTRY</b>: LIMIT di <b>level baru</b> itu, dipasang begitu candle cross closed.
-    Limit baru RESMI ARMED begitu harga M5 masuk radius
-    <b>{APPROACH_PCT*100:.1f}%</b> dari entry_price, lalu ditunggu sampai TERSENTUH (fill).
-    Kalau menjauh lagi &gt;{APPROACH_PCT*100:.1f}% sebelum tersentuh, limit disarm (balik
-    menunggu, tetap hidup).
-    <br>• <b>KADALUARSA</b>: kalau dalam <b>{EXPIRE_CANDLES}</b> candle H1 setelah candle cross closed
-    limit tidak PERNAH tersentuh → setup GUGUR, dibuang permanen. Tiap level HANYA dipakai 1x.
+    c1 baru dihitung setelah {EMA_WARMUP} candle H1 pertama (warmup EMA).
+    <br>• <b>Monitoring M5</b> (setelah level siap): <b>body</b> M5 harus menembus level
+    <b>KELUAR</b> (Support: close di bawah level; Resistance: close di atas), lalu body M5 menembus
+    level lagi <b>MASUK</b> (close balik ke sisi semula). Wick tidak dihitung.
+    <br>• <b>GUGUR</b>: setelah KELUAR, kalau harga sampai <b>{LEVEL_FAIL_PCT*100:.1f}%</b> dari level
+    (Support: low ≤ level −{LEVEL_FAIL_PCT*100:.1f}%; Resistance: high ≥ level +{LEVEL_FAIL_PCT*100:.1f}%)
+    sebelum MASUK → level gugur. Level yang belum pernah KELUAR tetap dipantau.
+    <br>• <b>ENTRY</b>: begitu body M5 MASUK → <b>MARKET</b> di close candle M5 itu
+    (Support → Long, Resistance → Short). Tiap level HANYA dipakai 1x.
     <br>• <b>SL</b> tepat <b>{SL_PCT*100:.2f}%</b> dari entry (=1R).
     <b>Trailing stop</b>: aktif begitu profit capai <b>{TRAIL_ACTIVATE_R:.1f}R</b>, lalu SL mengikuti
     <b>{TRAIL_STOP_R:.1f}R</b> di belakang harga tertinggi/terendah yang pernah dicapai (dipantau M5).
-    Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>. Level MATI
-    setelah 1x terisi (menang/kalah).
+    Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>.
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
     Sinyal terblokir — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
-    min order: {cr.get('blocked_by_min_order',0)}. Kadaluarsa (limit tak tersentuh
-    {EXPIRE_CANDLES} candle): {cr.get('expired_count',0)}.
+    min order: {cr.get('blocked_by_min_order',0)}. Level gugur (M5 keluar lalu
+    {LEVEL_FAIL_PCT*100:.1f}% dari level): {cr.get('failed_count',0)}.
     <br>Unduh semua trade: <a href="/trades.csv">/trades.csv</a> &nbsp;|&nbsp;
     Log mentah: <a href="/logs">/logs</a>
   </div>
@@ -1253,11 +1088,11 @@ def _trades_csv() -> bytes:
         trades_cp = list(_all_trades)
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=[
-        'symbol', 'kind', 'direction', 'level', 'src_level', 'src_wick_tip',
-        'src_level_formed_wib', 'level_formed_wib', 'touch_wib', 'cross_wib', 'entry_wib', 'exit_wib',
+        'symbol', 'kind', 'direction', 'level',
+        'level_formed_wib', 'out_wib', 'entry_wib', 'exit_wib',
         'entry', 'sl', 'exit', 'reason', 'r_mult',
         'pnl_usd', 'balance_after',
-        'src_level_formed_ts', 'level_formed_ts', 'touch_ts', 'cross_ts', 'entry_ts', 'exit_ts'],
+        'level_formed_ts', 'out_ts', 'entry_ts', 'exit_ts'],
         extrasaction='ignore')
     writer.writeheader()
     for t in trades_cp:
