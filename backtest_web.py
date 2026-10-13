@@ -383,16 +383,22 @@ def _m5_break_entry(m5, ty, level, start_ts):
               MASUK = candle PERTAMA setelah k yang close-nya > level; candle itu harus
               sekaligus close > low[k-1] (ujung atas FVG, harus melebihi). Kalau hanya
               close > level tapi <= low[k-1] -> 'partial' (gugur, tidak dipantau lagi).
-              GUGUR = low <= level x (1 - LEVEL_FAIL_PCT) (setelah/di candle keluar).
+              GUGUR = sejak SENTUHAN PERTAMA level (wick cukup, bukan hanya body), harga
+              menjauh LEVEL_FAIL_PCT ke bawah (low <= level x 0.98) ATAU ke atas
+              (high >= level x 1.02) -> gugur. Selama masih di dalam zona, level terus
+              dipantau sampai break body (FVG ok/gagal) atau keluar zona.
     Resistance: kebalikannya (KELUAR close > level dgn high[k-1] < level & low[k+1] >
               level; MASUK = candle pertama close < level yg juga close < high[k-1];
               GUGUR high >= level x (1 + LEVEL_FAIL_PCT)).
     Urutan waktu menentukan: gugur 2% yang terjadi lebih dulu atau di candle yang sama
     dgn candle MASUK/partial dihitung 'failed' (konservatif).
     Return (status, k_out, m_in):
-      'none'    -- belum pernah break body
-      'waiting' -- break body pertama terjadi di candle terakhir data (FVG belum
+      'none'    -- level belum pernah disentuh (zona 2% belum dimulai)
+      'waiting' -- sudah disentuh tapi belum break body & masih di dalam zona +/-2%;
+                   ATAU break body terjadi di candle terakhir data (FVG belum
                    bisa dikonfirmasi) ATAU sudah keluar, belum ada close balik di sisi level
+      'failed'  -- keluar zona +/-2% (bawah ATAU atas level) sebelum/di candle break
+                   atau sebelum/di candle MASUK
       'nofvg'   -- break body pertama bukan FVG -> gugur
       'partial' -- close balik pertama di sisi level tidak menutup seluruh FVG -> gugur
       'failed'  -- gugur (2%) sebelum masuk
@@ -402,13 +408,29 @@ def _m5_break_entry(m5, ty, level, start_ts):
     s0 = int(np.searchsorted(TS, start_ts, side='left'))
     if s0 >= n5:
         return 'none', None, None
+    # SENTUHAN PERTAMA (wick cukup): zona gugur +/-LEVEL_FAIL_PCT baru dimulai dari sini.
     if ty == 'support':
-        out_mask = C[s0:] < level
+        touch_mask = L[s0:] <= level
     else:
-        out_mask = C[s0:] > level
+        touch_mask = H[s0:] >= level
+    if not touch_mask.any():
+        return 'none', None, None            # level belum pernah disentuh
+    t0 = s0 + int(touch_mask.argmax())
+
+    # Zona gugur 2 sisi: sejak t0, harga menjauh LEVEL_FAIL_PCT ke bawah ATAU ke atas level.
+    zone_mask = (L[t0:] <= level * (1 - LEVEL_FAIL_PCT)) | (H[t0:] >= level * (1 + LEVEL_FAIL_PCT))
+    g = (t0 + int(zone_mask.argmax())) if zone_mask.any() else None
+
+    if ty == 'support':
+        out_mask = C[t0:] < level
+    else:
+        out_mask = C[t0:] > level
     if not out_mask.any():
-        return 'none', None, None
-    k = s0 + int(out_mask.argmax())          # body break PERTAMA
+        # belum ada body break: tetap dipantau selama belum keluar zona, kalau sudah keluar -> gugur
+        return ('failed' if g is not None else 'waiting'), None, None
+    k = t0 + int(out_mask.argmax())          # body break PERTAMA
+    if g is not None and g <= k:
+        return 'failed', k, None             # keluar zona 2% lebih dulu / di candle yang sama dgn break
     if k == 0:
         return 'nofvg', k, None              # tidak ada candle sebelumnya utk dicek FVG
     if k >= n5 - 1:
@@ -424,12 +446,9 @@ def _m5_break_entry(m5, ty, level, start_ts):
         return 'nofvg', k, None
 
     if ty == 'support':
-        fail_mask = L[k:] <= level * (1 - LEVEL_FAIL_PCT)
         back_mask = C[k + 1:] > level        # close balik di sisi level (percobaan MASUK pertama)
     else:
-        fail_mask = H[k:] >= level * (1 + LEVEL_FAIL_PCT)
         back_mask = C[k + 1:] < level
-    g = (k + int(fail_mask.argmax())) if fail_mask.any() else None
     m0 = (k + 1 + int(back_mask.argmax())) if back_mask.any() else None
     if m0 is None:
         return ('failed' if g is not None else 'waiting'), k, None
@@ -943,7 +962,7 @@ def _run():
     try:
         _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + monitoring M5) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
         _log_msg(f"   Syarat: level awal c1-c2 (candle sebelum c1 & sesudah c2 tidak melebihi level, tanpa EMA) -> monitoring M5: body M5 KELUAR level harus FVG (bukan FVG -> gugur) lalu body M5 MASUK harus menutup seluruh FVG (tidak menutup -> gugur) -> pasang LIMIT di angka level (batal kalau tak terisi {LIMIT_EXPIRE_HOURS:g} jam)  "
-                  f"(gugur kalau setelah keluar harga {LEVEL_FAIL_PCT*100:.1f}% dari level)  "
+                  f"(zona gugur dimulai dari sentuhan pertama: harga {LEVEL_FAIL_PCT*100:.1f}% ke bawah ATAU ke atas dari level -> gugur)  "
                   f"SL = ujung wick terpanjang c1/c2  "
                   f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
 
@@ -1140,9 +1159,10 @@ def _render_html() -> bytes:
     <b>menutup seluruh FVG</b> (Support: close di atas low candle sebelum break-out; Resistance: close di bawah
     high candle sebelum break-out; harus melebihi, sama tidak cukup). Kalau candle pertama itu hanya close
     melewati level tanpa menutup FVG → setup langsung <b>gugur</b>. Wick tidak dihitung.
-    <br>• <b>GUGUR</b>: setelah KELUAR, kalau harga sampai <b>{LEVEL_FAIL_PCT*100:.1f}%</b> dari level
-    (Support: low ≤ level −{LEVEL_FAIL_PCT*100:.1f}%; Resistance: high ≥ level +{LEVEL_FAIL_PCT*100:.1f}%)
-    sebelum MASUK → level gugur. Level yang belum pernah KELUAR tetap dipantau.
+    <br>• <b>GUGUR</b>: zona dimulai dari <b>sentuhan pertama</b> level (wick cukup). Sejak itu, kalau harga
+    menjauh <b>{LEVEL_FAIL_PCT*100:.1f}%</b> ke bawah ATAU ke atas dari level (low ≤ level −{LEVEL_FAIL_PCT*100:.1f}%
+    atau high ≥ level +{LEVEL_FAIL_PCT*100:.1f}%) sebelum break body/MASUK → level gugur. Selama masih di dalam
+    zona, level terus dipantau dan boleh dicoba lagi sampai break (FVG ok/gagal) atau keluar zona.
     <br>• <b>ENTRY</b>: begitu body M5 MASUK → pasang <b>LIMIT</b> di <b>angka level</b> yang tadi
     ditembus (Support → Long, Resistance → Short). Limit terisi saat harga M5 retest level
     (wick cukup). Kalau tidak terisi dalam <b>{LIMIT_EXPIRE_HOURS:g} jam</b> sejak candle MASUK closed →
