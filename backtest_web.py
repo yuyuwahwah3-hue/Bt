@@ -8,7 +8,8 @@ body M5 harus menembus level KELUAR (candle break-out harus sebuah FVG, kalau
 bukan -> setup gugur), lalu body M5 harus menutup SELURUH FVG itu (MASUK; kalau
 hanya close di atas level tanpa menutup FVG -> gugur).
 Begitu body M5 break MASUK -> pasang LIMIT entry di angka level itu, fill saat
-harga retest level. SL = ujung wick terpanjang c1/c2. Tidak ada EMA, tidak ada
+harga retest level. SL = pergerakan terluar/terjauh harga dari level (sejak sentuhan
+pertama sampai candle MASUK). Tidak ada EMA, tidak ada
 level kedua, tidak ada filter wick.
 
 RINGKASAN STRATEGI
@@ -60,12 +61,13 @@ RINGKASAN STRATEGI
    Level MATI setelah 1x entry (terfill atau gugur). Kalau slot/margin/min order tidak cukup saat fill,
    setup hangus.
 
-4) STOP LOSS -- TIDAK fix. SL = ujung WICK TERPANJANG antara c1 dan c2 (H1):
-   Support: low dari wick bawah terpanjang; Resistance: high dari wick atas
-   terpanjang. Panjang wick diukur dari ujung body ke ujung wick. Hanya wick yang
-   ujungnya melewati level ke arah SL yang dihitung (SL tidak boleh di sisi yang
-   salah dari entry); kalau c1 maupun c2 tidak punya, level dilewati (tidak ada
-   SL valid). Kalau candle fill juga sudah menyentuh SL -> langsung kena SL.
+4) STOP LOSS -- TIDAK fix. SL = PERGERAKAN TERLUAR / TERJAUH harga dari level (M5):
+   dari SENTUHAN PERTAMA level (wick cukup) sampai candle MASUK (ikut dihitung),
+   termasuk candle break-out, FVG sendiri, dan candle-candle sesudahnya.
+   Support/Long: low terendah di rentang itu; Resistance/Short: high tertinggi.
+   Contoh Long: harga terus turun sampai 1.4% di bawah level lalu balik dan break-in
+   -> SL di 1.4% dari level (pasti < 2%, karena kalau sampai 2% level sudah gugur).
+   Kalau candle fill juga sudah menyentuh SL -> langsung kena SL.
    Ukuran posisi = risiko RISK_PCT / jarak entry-SL (jarak itu = 1R).
    TRAILING STOP: aktif di TRAIL_ACTIVATE_R (2R), SL mengikuti TRAIL_STOP_R (1R)
    di belakang harga ekstrem (dipantau M5). Kalau di candle M5 yg sama harga
@@ -334,7 +336,8 @@ def find_levels(df):
     c1/c2 boleh sama sekali tidak punya wick.
     'confirm_i' = index candle H1 TERAKHIR yang dibutuhkan untuk memastikan level
                   valid = c3. Level siap (tanpa lookahead) begitu candle ini closed.
-    'wick_tip' = ujung wick terpanjang c1/c2 (harga SL), None kalau tidak ada yg valid.
+    'wick_tip' = ujung wick terpanjang c1/c2 (TIDAK dipakai lagi utk SL; SL kini pergerakan
+                 terluar M5, lihat _m5_extreme_sl). Dibiarkan hanya sbg info.
     Return list dict: {'type', 'level', 'c1', 'c2', 'c_left', 'c_right', 'confirm_i', 'wick_tip'}."""
     o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
     n = len(df)
@@ -480,6 +483,30 @@ def _m5_break_entry(m5, ty, level, start_ts):
     return 'partial', k, None
 
 
+def _m5_extreme_sl(m5, ty, level, start_ts, m_in):
+    """SL = PERGERAKAN TERLUAR / TERJAUH harga dari level (bukan ujung wick c1/c2 H1).
+    Rentang: dari SENTUHAN PERTAMA level (wick cukup) sampai candle MASUK (m_in, ikut
+    dihitung) -- mencakup candle break-out, FVG sendiri, dan candle-candle sesudahnya.
+    Support/Long : low terendah di rentang itu. Resistance/Short: high tertinggi.
+    Karena gugur kalau menjauh >= LEVEL_FAIL_PCT (2%), SL pasti < 2% dari level.
+    Setelah candle MASUK, limit menunggu harga kembali ke level, jadi SL sudah final.
+    Return float, atau None kalau tidak valid (SL harus benar-benar di luar level)."""
+    TS, H, L = m5['TS'], m5['H'], m5['L']
+    s0 = int(np.searchsorted(TS, start_ts, side='left'))
+    if ty == 'support':
+        touch = np.nonzero(L[s0:m_in + 1] <= level)[0]
+    else:
+        touch = np.nonzero(H[s0:m_in + 1] >= level)[0]
+    if len(touch) == 0:
+        return None
+    t0 = s0 + int(touch[0])
+    if ty == 'support':
+        sl = float(L[t0:m_in + 1].min())
+        return sl if sl < level - 1e-12 else None
+    sl = float(H[t0:m_in + 1].max())
+    return sl if sl > level + 1e-12 else None
+
+
 def _m5_limit_fill(m5, ty, level, m_in):
     """Limit di angka level dipasang setelah candle MASUK (index m_in) closed.
     Fill di candle M5 pertama SETELAH m_in yang menyentuh level (wick cukup):
@@ -527,13 +554,14 @@ def detect_snr_events(df, m5):
     gugur) -- lihat _m5_break_entry. FVG juga harus FRESH: sebelum candle MASUK, tidak
     boleh ada candle (wick/body) yang masuk area gap FVG -> kalau ada, gugur ('stale').
     Begitu MASUK: LIMIT di angka level, fill saat harga retest level
-    (_m5_limit_fill). SL = ujung wick terpanjang c1/c2 (bukan persen tetap).
+    (_m5_limit_fill). SL = pergerakan terluar/terjauh harga dari level, sejak sentuhan
+    pertama sampai candle MASUK (_m5_extreme_sl; bukan persen tetap).
     Gugur kalau setelah keluar harga sampai LEVEL_FAIL_PCT (2%) dari level, atau
     limit tidak terfill dalam LIMIT_EXPIRE_HOURS (4 jam) sejak candle MASUK closed.
 
     Return (events, stats):
     events: list dict {'kind', 'type', 'level', 'direction', 'entry_price' (= level),
-            'sl_price' (= wick_tip), 'fill_ts' (open ts candle M5 saat limit fill),
+            'sl_price' (= pergerakan terluar), 'fill_ts' (open ts candle M5 saat limit fill),
             'in_ts' (open ts candle M5 MASUK), 'out_ts', 'confirm_ts', 'c1_ts',
             'c1', 'c2'} urut fill_ts
     stats : {'levels', 'entry', 'nofvg', 'partial', 'stale', 'failed', 'expired', 'pending', 'no_sl'}"""
@@ -548,9 +576,6 @@ def detect_snr_events(df, m5):
     for lv in levels:
         ty = lv['type']
         level = lv['level']
-        if lv['wick_tip'] is None:
-            stats['no_sl'] += 1   # c1 dan c2 tidak punya wick yg valid utk SL
-            continue
         start_ts = int(ts[lv['confirm_i']]) + 3600 * 1000   # candle confirm closed
         status, k, m = _m5_break_entry(m5, ty, level, start_ts)
         if status == 'nofvg':
@@ -578,13 +603,17 @@ def detect_snr_events(df, m5):
         if fstatus != 'fill':
             stats['pending'] += 1   # data habis sebelum jendela limit selesai
             continue
+        sl_px = _m5_extreme_sl(m5, ty, level, start_ts, m)
+        if sl_px is None:
+            stats['no_sl'] += 1   # tidak ada pergerakan terluar yg valid utk SL (tidak mungkin normalnya)
+            continue
         stats['entry'] += 1
 
         events.append({
             'kind': 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE',
             'type': ty, 'level': level,
             'direction': 'Long' if ty == 'support' else 'Short',
-            'entry_price': level, 'sl_price': lv['wick_tip'],
+            'entry_price': level, 'sl_price': sl_px,
             'fill_ts': int(m5['TS'][f]),
             'in_ts': int(m5['TS'][m]),
             'out_ts': int(m5['TS'][k]),
@@ -651,7 +680,7 @@ def prepare_coin(symbol, df, m5):
 #
 # Tiap event dari detect_all_events() SUDAH final: level sudah break keluar lalu
 # MASUK di M5, limit di angka level sudah dipasang dan sudah tersentuh di fill_ts
-# (entry_price = level, sl_price = ujung wick terpanjang c1/c2). Simulasi cukup
+# (entry_price = level, sl_price = pergerakan terluar harga dari level). Simulasi cukup
 # membuka posisi saat waktu (M5) sampai di fill_ts event itu. Kalau slot/margin/
 # min order tidak cukup, setup hangus.
 
@@ -680,7 +709,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         nonlocal balance, total_margin_used
         direction = ev['direction']
         sl = ev['sl_price']
-        dist = abs(entry_price - sl)   # = 1R (jarak entry ke SL = ujung wick terpanjang c1/c2)
+        dist = abs(entry_price - sl)   # = 1R (jarak entry ke SL = pergerakan terluar harga dari level)
 
         risk_amount = balance * RISK_PCT
         raw_qty = risk_amount / dist if dist > 0 else 0
@@ -788,7 +817,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
 
         # 2) event limit entry simbol ini: limit di angka level tersentuh di candle ini
         #    (fill di harga level). Slot/margin/min order tidak cukup -> setup hangus.
-        #    Kalau candle fill yang sama juga sudah menyentuh SL (SL = ujung wick, lebih
+        #    Kalau candle fill yang sama juga sudah menyentuh SL (SL = pergerakan terluar, lebih
         #    jauh dari level, jadi harga pasti lewat level dulu) -> langsung kena SL.
         #    Kalau tidak, SL/trailing dicek mulai candle M5 BERIKUTNYA.
         plist = pending_fills.get(symbol)
@@ -1004,7 +1033,7 @@ def _run():
         _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + monitoring M5) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
         _log_msg(f"   Syarat: level awal c1-c2 (candle sebelum c1 & sesudah c2 tidak melebihi level, tanpa EMA) -> monitoring M5: body M5 KELUAR level harus FVG (bukan FVG -> gugur) lalu body M5 MASUK harus menutup seluruh FVG (tidak menutup -> gugur) -> pasang LIMIT di angka level (batal kalau tak terisi {LIMIT_EXPIRE_HOURS:g} jam)  "
                   f"(zona gugur dimulai dari sentuhan pertama: harga {LEVEL_FAIL_PCT*100:.1f}% ke bawah ATAU ke atas dari level -> gugur)  "
-                  f"SL = ujung wick terpanjang c1/c2  "
+                  f"SL = pergerakan terluar/terjauh dari level (sentuhan pertama s/d candle MASUK)  "
                   f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
 
         coins = {}
@@ -1212,8 +1241,8 @@ def _render_html() -> bytes:
     ditembus (Support → Long, Resistance → Short). Limit terisi saat harga M5 retest level
     (wick cukup). Kalau tidak terisi dalam <b>{LIMIT_EXPIRE_HOURS:g} jam</b> sejak candle MASUK closed →
     limit batal, setup gugur. Tiap level HANYA dipakai 1x.
-    <br>• <b>SL</b> = <b>ujung wick terpanjang</b> antara c1 dan c2 (Support: low wick bawah,
-    Resistance: high wick atas), bukan persen tetap. Jarak entry–SL = 1R untuk ukuran posisi.
+    <br>• <b>SL</b> = <b>pergerakan terluar/terjauh</b> harga dari level, sejak sentuhan pertama sampai candle MASUK
+    (Support: low terendah; Resistance: high tertinggi; selalu &lt; {LEVEL_FAIL_PCT*100:.0f}% dari level), bukan persen tetap. Jarak entry–SL = 1R untuk ukuran posisi.
     <b>Trailing stop</b>: aktif begitu profit capai <b>{TRAIL_ACTIVATE_R:.1f}R</b>, lalu SL mengikuti
     <b>{TRAIL_STOP_R:.1f}R</b> di belakang harga tertinggi/terendah yang pernah dicapai (dipantau M5).
     Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>.
