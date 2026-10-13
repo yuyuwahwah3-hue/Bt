@@ -469,18 +469,32 @@ def _m5_limit_fill(m5, ty, level, m_in):
     dihitung (dengan 4 jam & M5 = 48 candle setelah candle MASUK).
     Return (status, index):
       ('fill', idx)    -- terfill di candle idx
+      ('failed', None) -- zona +/-LEVEL_FAIL_PCT (2%) dari level terlewati SEBELUM limit terfill
       ('expired', None)-- jendela waktu sudah lewat (ada data sesudahnya), tidak terfill
-      ('pending', None)-- data habis sebelum jendela selesai, belum terfill"""
+      ('pending', None)-- data habis sebelum jendela selesai, belum terfill
+    Zona 2% (dimulai dari sentuhan pertama level) tetap berlaku selama limit terpasang:
+    harga menjauh dari level sisi seberang fill (Long: high >= level x 1.02; Short: low <=
+    level x 0.98) sebelum limit terfill -> gugur. Kalau di candle yang sama dgn fill ->
+    dihitung gugur (urutan intrabar tak diketahui, konservatif). Sisi fill (Long: low <=
+    level x 0.98) tidak membatalkan: limit di level pasti terfill lebih dulu."""
     TS = m5['TS']
     n5 = len(TS)
     expire_ts = int(TS[m_in]) + 5 * 60 * 1000 + int(LIMIT_EXPIRE_HOURS * 3600 * 1000)
     end = int(np.searchsorted(TS, expire_ts, side='left'))   # eksklusif
+    Hs = m5['H'][m_in + 1:end]
+    Ls = m5['L'][m_in + 1:end]
     if ty == 'support':
-        mask = m5['L'][m_in + 1:end] <= level
+        fill_mask = Ls <= level
+        away_mask = Hs >= level * (1 + LEVEL_FAIL_PCT)
     else:
-        mask = m5['H'][m_in + 1:end] >= level
-    if mask.any():
-        return 'fill', m_in + 1 + int(mask.argmax())
+        fill_mask = Hs >= level
+        away_mask = Ls <= level * (1 - LEVEL_FAIL_PCT)
+    f = int(fill_mask.argmax()) if fill_mask.any() else None
+    ga = int(away_mask.argmax()) if away_mask.any() else None
+    if ga is not None and (f is None or ga <= f):
+        return 'failed', None   # harga lari 2% menjauh dari level sebelum limit terfill
+    if f is not None:
+        return 'fill', m_in + 1 + f
     return ('expired' if end < n5 else 'pending'), None
 
 
@@ -531,6 +545,9 @@ def detect_snr_events(df, m5):
             stats['pending'] += 1
             continue
         fstatus, f = _m5_limit_fill(m5, ty, level, m)
+        if fstatus == 'failed':
+            stats['failed'] += 1    # zona 2% terlewati saat limit terpasang, belum terfill -> gugur
+            continue
         if fstatus == 'expired':
             stats['expired'] += 1   # limit tidak terfill dalam LIMIT_EXPIRE_HOURS -> gugur
             continue
@@ -1163,6 +1180,8 @@ def _render_html() -> bytes:
     menjauh <b>{LEVEL_FAIL_PCT*100:.1f}%</b> ke bawah ATAU ke atas dari level (low ≤ level −{LEVEL_FAIL_PCT*100:.1f}%
     atau high ≥ level +{LEVEL_FAIL_PCT*100:.1f}%) sebelum break body/MASUK → level gugur. Selama masih di dalam
     zona, level terus dipantau dan boleh dicoba lagi sampai break (FVG ok/gagal) atau keluar zona.
+    Zona 2% ini <b>tetap berlaku setelah limit terpasang</b>: kalau harga lari 2% menjauh dari level
+    sebelum limit terfill → gugur.
     <br>• <b>ENTRY</b>: begitu body M5 MASUK → pasang <b>LIMIT</b> di <b>angka level</b> yang tadi
     ditembus (Support → Long, Resistance → Short). Limit terisi saat harga M5 retest level
     (wick cukup). Kalau tidak terisi dalam <b>{LIMIT_EXPIRE_HOURS:g} jam</b> sejak candle MASUK closed →
