@@ -196,7 +196,7 @@ _combined_result = {
     'n_trades': 0, 'n_win': 0, 'n_loss': 0, 'wr': 0, 'total_pnl': 0, 'roi': 0,
     'total_r': 0, 'avg_r': 0, 'final_balance': INITIAL_BALANCE,
     'blocked_by_slot': 0, 'blocked_by_margin': 0, 'blocked_by_min_order': 0, 'blocked_by_invalid_sl': 0,
-    'failed_count': 0, 'expired_count': 0, 'nofvg_count': 0, 'partial_count': 0,
+    'failed_count': 0, 'expired_count': 0, 'nofvg_count': 0, 'partial_count': 0, 'stale_count': 0,
 }
 
 
@@ -400,6 +400,9 @@ def _m5_break_entry(m5, ty, level, start_ts):
       'failed'  -- keluar zona +/-2% (bawah ATAU atas level) sebelum/di candle break
                    atau sebelum/di candle MASUK
       'nofvg'   -- break body pertama bukan FVG -> gugur
+      'stale'   -- FVG tidak fresh: setelah FVG terbentuk (candle k+1) ada candle (wick/body)
+                   yg masuk area gap SEBELUM candle MASUK -> gugur. Hanya candle MASUK
+                   yg boleh masuk/melewati gap.
       'partial' -- close balik pertama di sisi level tidak menutup seluruh FVG -> gugur
       'failed'  -- gugur (2%) sebelum masuk
       'entry'   -- masuk di index m_in (k_out = index candle keluar)"""
@@ -450,6 +453,23 @@ def _m5_break_entry(m5, ty, level, start_ts):
     else:
         back_mask = C[k + 1:] < level
     m0 = (k + 1 + int(back_mask.argmax())) if back_mask.any() else None
+
+    # FVG HARUS FRESH sebelum break-in: setelah candle pembentuk FVG (k+1), tidak boleh ada
+    # candle (wick ATAU body) yg masuk area gap -- hanya candle MASUK (m0) yg boleh.
+    # Gap Support  = [high[k+1], low[k-1]]  -> candle masuk gap kalau high > high[k+1]
+    # Gap Resist.  = [high[k-1], low[k+1]]  -> candle masuk gap kalau low  < low[k+1]
+    end_chk = m0 if m0 is not None else n5          # eksklusif: m0 sendiri boleh masuk gap
+    if end_chk > k + 2:
+        if ty == 'support':
+            touch_gap = H[k + 2:end_chk] > H[k + 1]
+        else:
+            touch_gap = L[k + 2:end_chk] < L[k + 1]
+        if touch_gap.any():
+            j = k + 2 + int(touch_gap.argmax())     # candle pertama yg menyentuh gap sebelum break-in
+            if g is not None and g <= j:
+                return 'failed', k, None
+            return 'stale', k, None                 # FVG tidak fresh lagi -> gugur
+
     if m0 is None:
         return ('failed' if g is not None else 'waiting'), k, None
     if g is not None and g <= m0:
@@ -504,7 +524,8 @@ def detect_snr_events(df, m5):
     Per level: mulai dari candle M5 pertama setelah level siap (candle confirm_i
     closed), cari body M5 KELUAR (harus FVG yang melingkupi level, kalau bukan -> gugur)
     lalu body M5 MASUK (close balik pertama harus menutup seluruh FVG, kalau tidak ->
-    gugur) -- lihat _m5_break_entry.
+    gugur) -- lihat _m5_break_entry. FVG juga harus FRESH: sebelum candle MASUK, tidak
+    boleh ada candle (wick/body) yang masuk area gap FVG -> kalau ada, gugur ('stale').
     Begitu MASUK: LIMIT di angka level, fill saat harga retest level
     (_m5_limit_fill). SL = ujung wick terpanjang c1/c2 (bukan persen tetap).
     Gugur kalau setelah keluar harga sampai LEVEL_FAIL_PCT (2%) dari level, atau
@@ -515,10 +536,10 @@ def detect_snr_events(df, m5):
             'sl_price' (= wick_tip), 'fill_ts' (open ts candle M5 saat limit fill),
             'in_ts' (open ts candle M5 MASUK), 'out_ts', 'confirm_ts', 'c1_ts',
             'c1', 'c2'} urut fill_ts
-    stats : {'levels', 'entry', 'nofvg', 'partial', 'failed', 'expired', 'pending', 'no_sl'}"""
+    stats : {'levels', 'entry', 'nofvg', 'partial', 'stale', 'failed', 'expired', 'pending', 'no_sl'}"""
     ts = df['ts'].values
     levels = find_levels(df)
-    stats = {'levels': len(levels), 'entry': 0, 'nofvg': 0, 'partial': 0, 'failed': 0, 'expired': 0, 'pending': 0, 'no_sl': 0}
+    stats = {'levels': len(levels), 'entry': 0, 'nofvg': 0, 'partial': 0, 'stale': 0, 'failed': 0, 'expired': 0, 'pending': 0, 'no_sl': 0}
     events = []
     if m5 is None:
         stats['pending'] = len(levels)
@@ -534,6 +555,9 @@ def detect_snr_events(df, m5):
         status, k, m = _m5_break_entry(m5, ty, level, start_ts)
         if status == 'nofvg':
             stats['nofvg'] += 1   # break body pertama bukan FVG -> gugur
+            continue
+        if status == 'stale':
+            stats['stale'] += 1   # FVG tidak fresh (ada candle masuk gap sebelum break-in) -> gugur
             continue
         if status == 'partial':
             stats['partial'] += 1   # close balik pertama tidak menutup seluruh FVG -> gugur
@@ -1002,7 +1026,7 @@ def _run():
             kind_str = ', '.join(f"{k}:{v}" for k, v in sorted(n_by_kind.items()))
             st = cp['stats']
             _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['entry']} limit terisi ({kind_str or '-'}), "
-                      f"{st['nofvg']} gugur tanpa FVG, {st['partial']} gugur break-in tak menutup FVG, {st['failed']} gugur (>{LEVEL_FAIL_PCT*100:.0f}%), {st['expired']} limit kadaluarsa ({LIMIT_EXPIRE_HOURS:g} jam), "
+                      f"{st['nofvg']} gugur tanpa FVG, {st['partial']} gugur break-in tak menutup FVG, {st['stale']} gugur FVG tidak fresh, {st['failed']} gugur (>{LEVEL_FAIL_PCT*100:.0f}%), {st['expired']} limit kadaluarsa ({LIMIT_EXPIRE_HOURS:g} jam), "
                       f"{st['pending']} belum terisi (data habis), {st['no_sl']} tanpa SL valid.")
 
         _log_msg(f"🧮 Menjalankan simulasi gabungan ({len(coins)} koin)...")
@@ -1011,6 +1035,7 @@ def _run():
         expired_total = sum(cp['stats']['expired'] for cp in coins.values())
         nofvg_total = sum(cp['stats']['nofvg'] for cp in coins.values())
         partial_total = sum(cp['stats']['partial'] for cp in coins.values())
+        stale_total = sum(cp['stats']['stale'] for cp in coins.values())
 
         _log_msg(f"🧮 Menjalankan simulasi PER-KOIN (independen, {len(coins)} koin)...")
         per_coin_raw = run_per_coin_backtests(coins, m5_data)
@@ -1038,6 +1063,7 @@ def _run():
                 'expired_count': expired_total,
                 'nofvg_count': nofvg_total,
                 'partial_count': partial_total,
+                'stale_count': stale_total,
             })
             _results[:] = per_symbol_breakdown(result['trades'])
             _kind_results[:] = per_kind_breakdown(result['trades'])
@@ -1193,7 +1219,7 @@ def _render_html() -> bytes:
     Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>.
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
     Sinyal terblokir — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
-    min order: {cr.get('blocked_by_min_order',0)}. Gugur karena break-out bukan FVG: {cr.get('nofvg_count',0)}. Gugur karena break-in tidak menutup FVG: {cr.get('partial_count',0)}. Level gugur (M5 keluar lalu
+    min order: {cr.get('blocked_by_min_order',0)}. Gugur karena break-out bukan FVG: {cr.get('nofvg_count',0)}. Gugur karena break-in tidak menutup FVG: {cr.get('partial_count',0)}. Gugur karena FVG tidak fresh (ada candle masuk gap sebelum break-in): {cr.get('stale_count',0)}. Level gugur (M5 keluar lalu
     {LEVEL_FAIL_PCT*100:.1f}% dari level): {cr.get('failed_count',0)}. Limit kadaluarsa
     (tak terisi {LIMIT_EXPIRE_HOURS:g} jam): {cr.get('expired_count',0)}.
     <br>Unduh semua trade: <a href="/trades.csv">/trades.csv</a> &nbsp;|&nbsp;
