@@ -1,33 +1,31 @@
 """
 backtest_web.py — Backtest strategi Support & Resistance + monitoring M5, H1/M5
 ================================================================================
-Level Support/Resistance AWAL dari candle H1 (c1,c2 berlawanan arah, c3 bersih,
-EMA cross searah di c2-c4). Setelah level tersentuh, harga DIPANTAU di M5:
+Level Support/Resistance AWAL dari candle H1: c1,c2 berlawanan arah, 1 candle
+SEBELUM c1 dan 1 candle SESUDAH c2 tidak boleh melebihi level. TANPA EMA sama
+sekali. Setelah level tersentuh, harga DIPANTAU di M5:
 body M5 harus menembus level KELUAR (candle break-out harus sebuah FVG, kalau
 bukan -> setup gugur), lalu body M5 harus menutup SELURUH FVG itu (MASUK; kalau
 hanya close di atas level tanpa menutup FVG -> gugur).
 Begitu body M5 break MASUK -> pasang LIMIT entry di angka level itu, fill saat
-harga retest level. SL = ujung wick terpanjang c1/c2. Tidak ada EMA cross kedua,
-tidak ada level kedua, tidak ada filter wick.
+harga retest level. SL = ujung wick terpanjang c1/c2. Tidak ada EMA, tidak ada
+level kedua, tidak ada filter wick.
 
 RINGKASAN STRATEGI
 -------------------
-1) DETEKSI LEVEL (H1):
+1) DETEKSI LEVEL (H1) -- tanpa EMA:
    Support: candle c1 bearish (close<open) lalu c2 bullish (close>open).
             Level = close[c1].
    Resistance: candle c1 bullish (close>open) lalu c2 bearish (close<open).
             Level = close[c1].
    Valid kalau:
-            - KANAN: N_RIGHT candle SETELAH c1,c2 (default 1, c3 saja) --
-              WICK-nya tidak boleh menyentuh level SAMA SEKALI.
-            - EMA CROSS AWAL: SALAH SATU dari candle c2, c3, atau c4 HARUS
-              menjadi PENYEBAB cross EMA_FAST/EMA_SLOW (default 4/10, dari
-              close H1) searah level: Support -> GOLDEN CROSS, Resistance ->
-              DEATH CROSS. Kalau tidak ada, level GUGUR.
-            - WARMUP: c1 harus di candle ke-EMA_WARMUP (default 50) ke atas
-              (EMA dihitung dari awal data, cross di candle awal bisa palsu).
-   Level baru dianggap SIAP begitu c3 closed DAN cross sudah terjadi (candle
-   terakhir dari keduanya closed) -- monitoring M5 mulai dari situ (tanpa lookahead).
+            - SESUDAH c2: N_RIGHT candle (default 1, c3 saja) tidak boleh melebihi
+              level -- Support: low c3 > level; Resistance: high c3 < level
+              (WICK-nya tidak boleh menyentuh level sama sekali, sama dengan level
+              juga tidak lolos).
+            - SEBELUM c1: N_LEFT candle (default 1, c0 saja) juga tidak boleh
+              melebihi level -- Support: low c0 > level; Resistance: high c0 < level.
+   Level SIAP begitu c3 closed -- monitoring M5 mulai dari situ (tanpa lookahead).
 
 2) MONITORING M5 (mulai setelah level siap; level tersentuh otomatis tercakup
    karena body yang menembus level pasti menyentuhnya):
@@ -141,8 +139,8 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 # di bawah FLOWUSDT -0.1%) tidak diikutkan lagi.
 # Hasil backtest 1 tahun (S&R + EMA cross c2-c4 + TEST1/TEST2 engulfing) --
 # hanya koin dengan WIN RATE >= 50% yang dipakai (bukan filter ROI kali ini).
-# CATATAN: daftar ini dipilih saat strategi masih TEST1/TEST2 -- jalankan ulang
-# backtest dgn strategi baru (entry di tengah EMA cross) lalu filter ulang kalau perlu.
+# CATATAN: daftar ini dipilih dari strategi lama (EMA cross + TEST1/TEST2) -- jalankan
+# ulang backtest dgn strategi sekarang lalu filter ulang kalau perlu.
 SYMBOLS = [
     'PENDLEUSDT', 'PYTHUSDT', 'BLURUSDT', '1000BONKUSDT', 'WUSDT',
     'USUALUSDT', 'ETHFIUSDT', 'LABUSDT', 'IOTAUSDT', '1000FLOKIUSDT',
@@ -299,16 +297,8 @@ def fetch_bybit_m5(symbol: str) -> pd.DataFrame:
 # DETEKSI LEVEL SUPPORT / RESISTANCE (H1)
 # ============================================================
 
-EMA_FAST = int(os.environ.get('EMA_FAST', 4))
-EMA_SLOW = int(os.environ.get('EMA_SLOW', 10))
-EMA_WARMUP = int(os.environ.get('EMA_WARMUP', 50))   # c1 level harus di candle ke-N ke atas (EMA awal data belum stabil, cross di awal bisa palsu)
-N_RIGHT = 1   # jumlah candle kanan yang harus bersih (tidak menyentuh wick) -- cukup c3 saja
-
-def _compute_emas(c):
-    """EMA_FAST & EMA_SLOW dari array close (dipakai find_levels)."""
-    ema_fast = pd.Series(c).ewm(span=EMA_FAST, adjust=False).mean().values
-    ema_slow = pd.Series(c).ewm(span=EMA_SLOW, adjust=False).mean().values
-    return ema_fast, ema_slow
+N_RIGHT = 1   # jumlah candle SETELAH c2 yang tidak boleh melebihi level -- cukup c3 saja
+N_LEFT = 1    # jumlah candle SEBELUM c1 yang tidak boleh melebihi level -- cukup c0 saja
 
 def _longest_wick_tip(o, h, l, c, i, ty, level):
     """Ujung wick TERPANJANG antara c1 (index i) dan c2 (i+1) = harga SL.
@@ -333,55 +323,37 @@ def _longest_wick_tip(o, h, l, c, i, ty, level):
 
 
 def find_levels(df):
-    """Deteksi level Support & Resistance dari candle H1 (basis body candle).
-    Syarat kanan: N_RIGHT candle SETELAH c1,c2 (c3) -- WICK-nya (bukan cuma
-                  body) tidak boleh menyentuh level sama sekali.
+    """Deteksi level Support & Resistance dari candle H1 (TANPA EMA).
+    Support   : c1 bearish lalu c2 bullish, level = close[c1].
+    Resistance: c1 bullish lalu c2 bearish, level = close[c1].
+    Syarat kanan: N_RIGHT candle SETELAH c2 (c3) tidak boleh melebihi level --
+                  support: low > level; resistance: high < level (WICK-nya tidak
+                  boleh menyentuh level sama sekali, sama dengan level juga gagal).
+    Syarat kiri : N_LEFT candle SEBELUM c1 (c0) juga tidak boleh melebihi level --
+                  support: low > level; resistance: high < level.
     c1/c2 boleh sama sekali tidak punya wick.
-    Syarat EMA CROSS di RENTANG c2-c4 (EMA_FAST/EMA_SLOW, default 4/10 dari
-                  close H1): cukup SALAH SATU dari candle c2, c3, ATAU c4
-                  yang menjadi penyebab cross yang searah dengan arah level:
-                  - Support -> GOLDEN CROSS di c2/c3/c4 (EMA4 dari <= EMA10
-                    di candle sebelumnya, jadi > EMA10 di candle itu).
-                  - Resistance -> DEATH CROSS di c2/c3/c4 (EMA4 dari >=
-                    EMA10 di candle sebelumnya, jadi < EMA10 di candle itu).
-                  Kalau tidak ada satupun cross yang sesuai di c2-c4, level
-                  GUGUR.
-    c1 hanya dihitung mulai candle ke-EMA_WARMUP (EMA awal data belum stabil).
-    'level' = close[c1].
     'confirm_i' = index candle H1 TERAKHIR yang dibutuhkan untuk memastikan level
-                  valid = max(c3, cross paling awal di c2-c4). Level baru siap
-                  (tanpa lookahead) begitu candle ini closed.
+                  valid = c3. Level siap (tanpa lookahead) begitu candle ini closed.
     'wick_tip' = ujung wick terpanjang c1/c2 (harga SL), None kalau tidak ada yg valid.
-    Return list dict: {'type', 'level', 'c1', 'c2', 'c_right', 'confirm_i', 'wick_tip'}."""
+    Return list dict: {'type', 'level', 'c1', 'c2', 'c_left', 'c_right', 'confirm_i', 'wick_tip'}."""
     o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
     n = len(df)
-    ema_fast, ema_slow = _compute_emas(c)
-
-    def golden_cross_at(j):   # cross TEPAT di index j (dibanding j-1)
-        return ema_fast[j - 1] <= ema_slow[j - 1] and ema_fast[j] > ema_slow[j]
-
-    def death_cross_at(j):
-        return ema_fast[j - 1] >= ema_slow[j - 1] and ema_fast[j] < ema_slow[j]
 
     levels = []
-    for i in range(EMA_WARMUP, n - 3):   # skip candle warmup EMA; perlu c1,c2,c3,c4 (i..i+3) semua ada di dalam data
-        golden_js = [j for j in (i + 1, i + 2, i + 3) if golden_cross_at(j)]
-        death_js  = [j for j in (i + 1, i + 2, i + 3) if death_cross_at(j)]
+    for i in range(N_LEFT, n - 1 - N_RIGHT):   # perlu c0 (i-1) .. c3 (i+2) semua ada di dalam data
+        c_left = [i - 1 - k for k in range(N_LEFT)]
+        c_right = [i + 2 + k for k in range(N_RIGHT)]
         if c[i] < o[i] and c[i + 1] > o[i + 1]:          # bearish lalu bullish -> support
             S = c[i]
-            right_ok = all(l[i + 2 + k] > S + 1e-9 for k in range(N_RIGHT))
-            if right_ok and golden_js:
-                c_right = [i + 2 + k for k in range(N_RIGHT)]
+            if all(l[j] > S + 1e-9 for j in c_left) and all(l[j] > S + 1e-9 for j in c_right):
                 levels.append({'type': 'support', 'level': float(S), 'c1': i, 'c2': i + 1,
-                               'c_right': c_right, 'confirm_i': max(c_right[-1], min(golden_js)),
+                               'c_left': c_left, 'c_right': c_right, 'confirm_i': c_right[-1],
                                'wick_tip': _longest_wick_tip(o, h, l, c, i, 'support', float(S))})
         if c[i] > o[i] and c[i + 1] < o[i + 1]:          # bullish lalu bearish -> resistance
             R = c[i]
-            right_ok = all(h[i + 2 + k] < R - 1e-9 for k in range(N_RIGHT))
-            if right_ok and death_js:
-                c_right = [i + 2 + k for k in range(N_RIGHT)]
+            if all(h[j] < R - 1e-9 for j in c_left) and all(h[j] < R - 1e-9 for j in c_right):
                 levels.append({'type': 'resistance', 'level': float(R), 'c1': i, 'c2': i + 1,
-                               'c_right': c_right, 'confirm_i': max(c_right[-1], min(death_js)),
+                               'c_left': c_left, 'c_right': c_right, 'confirm_i': c_right[-1],
                                'wick_tip': _longest_wick_tip(o, h, l, c, i, 'resistance', float(R))})
     return levels
 
@@ -969,8 +941,8 @@ def _run():
     global _phase, _results, _kind_results, _per_coin_results, _all_trades, _combined_result
     global _monthly_results, _avg_monthly_growth
     try:
-        _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + EMA{EMA_FAST}/{EMA_SLOW} cross) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
-        _log_msg(f"   Syarat: level awal c1-c2 + cross di c2/c3/c4 -> monitoring M5: body M5 KELUAR level harus FVG (bukan FVG -> gugur) lalu body M5 MASUK harus menutup seluruh FVG (tidak menutup -> gugur) -> pasang LIMIT di angka level (batal kalau tak terisi {LIMIT_EXPIRE_HOURS:g} jam)  "
+        _log_msg(f"🚀 Mulai backtest SNR (Support & Resistance + monitoring M5) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
+        _log_msg(f"   Syarat: level awal c1-c2 (candle sebelum c1 & sesudah c2 tidak melebihi level, tanpa EMA) -> monitoring M5: body M5 KELUAR level harus FVG (bukan FVG -> gugur) lalu body M5 MASUK harus menutup seluruh FVG (tidak menutup -> gugur) -> pasang LIMIT di angka level (batal kalau tak terisi {LIMIT_EXPIRE_HOURS:g} jam)  "
                   f"(gugur kalau setelah keluar harga {LEVEL_FAIL_PCT*100:.1f}% dari level)  "
                   f"SL = ujung wick terpanjang c1/c2  "
                   f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
@@ -1157,10 +1129,9 @@ def _render_html() -> bytes:
 
   <div class="note">
     💡 <b>Support & Resistance awal + monitoring M5</b>, basis body candle:
-    <br>• Level terbentuk dari c1+c2 (2 candle berlawanan arah, H1), c3 bersih (wick tidak boleh
-    menyentuh level), dan salah satu dari c2/c3/c4 wajib jadi PENYEBAB cross
-    EMA{EMA_FAST}/EMA{EMA_SLOW} searah (Support → GOLDEN CROSS, Resistance → DEATH CROSS).
-    c1 baru dihitung setelah {EMA_WARMUP} candle H1 pertama (warmup EMA).
+    <br>• Level terbentuk dari c1+c2 (2 candle berlawanan arah, H1), <b>tanpa EMA</b>. Candle
+    <b>sebelum c1</b> dan candle <b>sesudah c2</b> tidak boleh melebihi level (Support: low-nya di
+    atas level; Resistance: high-nya di bawah level; sama dengan level juga tidak lolos).
     <br>• <b>Monitoring M5</b> (setelah level siap): body M5 PERTAMA yang menembus level
     <b>KELUAR</b> (Support: close di bawah level; Resistance: close di atas) harus sebuah <b>FVG</b>
     yang melingkupi level (Support: low candle sebelumnya di atas level &amp; high candle sesudahnya
