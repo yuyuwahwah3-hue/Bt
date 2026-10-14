@@ -68,14 +68,14 @@ from pybit.unified_trading import HTTP
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))   # modal awal, 1 akun bersama
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk per trade dari balance (compound)
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 EMA_FAST         = int(os.environ.get('EMA_FAST', 4))
 EMA_SLOW         = int(os.environ.get('EMA_SLOW', 10))
 EXPIRE_CANDLES   = int(os.environ.get('EXPIRE_CANDLES', 4))          # entry kadaluarsa N candle H1 setelah TEST2 closed
-SL_PCT           = float(os.environ.get('SL_PCT', '0.015'))          # SL FIX 1.5% dari entry
+SL_PCT           = float(os.environ.get('SL_PCT', '0.014'))          # SL FIX 1.5% dari entry
 RSI_PERIOD       = int(os.environ.get('RSI_PERIOD', 5))              # RSI M5
 RSI_LONG_MAX     = float(os.environ.get('RSI_LONG_MAX', '20'))       # Long entry kalau RSI < 20
 RSI_SHORT_MIN    = float(os.environ.get('RSI_SHORT_MIN', '50'))      # Short entry kalau RSI > 50
