@@ -22,18 +22,20 @@ RINGKASAN STRATEGI
    - TEST2: candle TEPAT SETELAH TEST1, harus ENGULFING -- Support: ujung body TEST2
      > high TEST1; Resistance: ujung body TEST2 < low TEST1. Plus body TEST2 harus
      lebih besar dari body TEST1 DAN lebih besar dari TOTAL wick TEST2 sendiri.
+     Sisi BERLAWANAN tidak boleh melebihi TEST1 (wick maupun body): Long -> low TEST2
+     tidak boleh di bawah low TEST1; Short -> high TEST2 tidak boleh di atas high TEST1.
      Kalau gagal, level gugur (hanya dicoba sekali).
 
-3) ENTRY -- LIMIT di UJUNG WICK candle TEST1 (Long -> high TEST1, Short -> low TEST1),
-   dipasang begitu candle TEST2 closed. TEST3 (ENABLE_TEST3): kalau limit TEST1
-   belum fill sampai candle TEST3 (1 candle H1 setelah TEST2) closed, entry dipindah
-   ke ujung wick TEST3 (Long -> low TEST3, Short -> high TEST3; tidak dipakai kalau
-   sisi salah dari SL). Limit KADALUARSA EXPIRE_CANDLES candle H1 setelah TEST2
-   (setelah TEST3 kalau sudah pindah). Tiap level dipakai 1x. Sinyal searah baru
-   dibuang kalau masih ada sinyal menunggu / posisi aktif searah di koin yang sama.
+3) ENTRY -- setelah candle H1 TEST2 closed, MONITORING M5 dengan RSI(RSI_PERIOD=5).
+   Candle M5 pertama yang dinilai = yang open-nya tepat saat H1 TEST2 closed (mis. H1
+   14:00 closed -> M5 15:00, bukan 14:55); tiap candle dinilai saat CLOSED.
+   Long -> RSI < 20; Short -> RSI > 50. Begitu terpenuhi -> ENTRY MARKET (di close
+   candle M5 itu, posisi aktif mulai candle M5 berikutnya). Dipantau terus sampai
+   entry atau kadaluarsa EXPIRE_CANDLES (4) candle H1 setelah TEST2. Tiap level 1x.
+   Sinyal searah baru dibuang kalau masih ada sinyal menunggu / posisi aktif searah
+   di koin yang sama.
 
-4) STOP LOSS ADAPTIF -- di ujung wick candle TEST2 (Long -> low, Short -> high),
-   floor minimal SL_MIN_PCT (1%) dari entry. Jarak entry-SL = 1R untuk ukuran posisi
+4) STOP LOSS FIX SL_PCT (1.5%) dari entry. Jarak entry-SL = 1R untuk ukuran posisi
    (risiko RISK_PCT dari balance).
    TRAILING STOP: aktif di TRAIL_ACTIVATE_R (3R), SL mengikuti TRAIL_STOP_R (1R) di
    belakang harga ekstrem (dipantau M5). Kalau di candle M5 yg sama harga menyentuh
@@ -47,7 +49,7 @@ Periode default: 1 tahun ke belakang dari hari script dijalankan (bisa
 di-override lewat env BACKTEST_START_DATE / BACKTEST_END_DATE).
 
 trades.csv ringkas (waktu WIB, UTC+7), kolom: Koin, Dir, Hasil ('Trail +1.6R'
-atau 'SL'), Level, Terbentuk, Test1, Test2, Entry, Tipe (T1/T3), Entry time.
+atau 'SL'), Level, Terbentuk, Test1, Test2, Entry, Entry time.
 """
 
 import os, threading, time, io, csv
@@ -70,17 +72,18 @@ FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 EMA_FAST         = int(os.environ.get('EMA_FAST', 4))
 EMA_SLOW         = int(os.environ.get('EMA_SLOW', 10))
-EXPIRE_CANDLES   = int(os.environ.get('EXPIRE_CANDLES', 4))          # limit kadaluarsa N candle H1 setelah TEST2 (atau TEST3)
-ENABLE_TEST3     = os.environ.get('ENABLE_TEST3', 'true').lower() == 'true'
-SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', '0.01'))       # floor SL minimum dari entry (SL adaptif wick TEST2)
-MIN_DIST_PCT     = float(os.environ.get('MIN_DIST_PCT', '0.01'))     # pengaman terakhir jarak entry-SL minimum
+EXPIRE_CANDLES   = int(os.environ.get('EXPIRE_CANDLES', 4))          # entry kadaluarsa N candle H1 setelah TEST2 closed
+SL_PCT           = float(os.environ.get('SL_PCT', '0.015'))          # SL FIX 1.5% dari entry
+RSI_PERIOD       = int(os.environ.get('RSI_PERIOD', 5))              # RSI M5
+RSI_LONG_MAX     = float(os.environ.get('RSI_LONG_MAX', '20'))       # Long entry kalau RSI < 20
+RSI_SHORT_MIN    = float(os.environ.get('RSI_SHORT_MIN', '50'))      # Short entry kalau RSI > 50
 TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '3.0'))  # trailing aktif begitu profit capai 3R (sama dgn bot)
 TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))      # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
 
-MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '10').strip().lower()
+MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '0').strip().lower()
 MAX_CONCURRENT = float('inf') if MAX_CONCURRENT_RAW in ('', '0', 'unlimited', 'inf') else int(MAX_CONCURRENT_RAW)
 
 ALLOW_HEDGE      = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
@@ -164,7 +167,7 @@ _combined_result = {
     'blocked_by_slot': 0, 'blocked_by_margin': 0, 'blocked_by_min_order': 0,
     'blocked_by_invalid_sl': 0, 'blocked_by_dup': 0,
     'no_test1_count': 0, 'test2_fail_count': 0, 'dup_signal_count': 0, 'expired_count': 0,
-    'pending_count': 0, 'levels_count': 0, 'filled_count': 0, 't3_count': 0,
+    'pending_count': 0, 'levels_count': 0, 'filled_count': 0,
 }
 
 
@@ -338,94 +341,72 @@ def _test_candidates(df, stats):
         test1_i = start + int(seg.argmax())
         t2 = test1_i + 1
 
-        # TEST2: engulfing
+        # TEST2: engulfing. Sisi BERLAWANAN tidak boleh melebihi TEST1 (wick/body):
+        # Long -> low TEST2 tidak boleh di bawah low TEST1; Short -> high TEST2 tidak
+        # boleh di atas high TEST1 (sama persis masih lolos).
         if ty == 'support':
             engulf_ok = max(o[t2], c[t2]) > h[test1_i] + WICK_EPS
+            opposite_ok = l[t2] >= l[test1_i] - WICK_EPS
         else:
             engulf_ok = min(o[t2], c[t2]) < l[test1_i] - WICK_EPS
+            opposite_ok = h[t2] <= h[test1_i] + WICK_EPS
         body_size_t1 = abs(c[test1_i] - o[test1_i])
         body_size_t2 = abs(c[t2] - o[t2])
         wick_total_t2 = (h[t2] - max(o[t2], c[t2])) + (min(o[t2], c[t2]) - l[t2])
-        if not (engulf_ok
+        if not (engulf_ok and opposite_ok
                 and body_size_t2 > body_size_t1 + WICK_EPS
                 and body_size_t2 > wick_total_t2 + WICK_EPS):
             stats['test2_fail'] += 1
             continue
 
         direction = 'Long' if ty == 'support' else 'Short'
-        entry1 = float(h[test1_i]) if direction == 'Long' else float(l[test1_i])
-        t3 = t2 + 1
-        if t3 < n:
-            entry3 = float(l[t3]) if direction == 'Long' else float(h[t3])
-            test3_ts = int(ts[t3])
-        else:
-            entry3, test3_ts = None, None
-        # SL ADAPTIF: ujung wick candle TEST2, floor SL_MIN_PCT dari entry
-        if direction == 'Long':
-            sl_price = min(float(l[t2]), entry1 - entry1 * SL_MIN_PCT)
-        else:
-            sl_price = max(float(h[t2]), entry1 + entry1 * SL_MIN_PCT)
-
         cands.append({
             'kind': 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE',
             'type': ty, 'level': level, 'direction': direction,
-            'entry_price': entry1, 'entry_price_t3': entry3, 'test3_ts': test3_ts,
-            'sl_price': sl_price,
             'ready_ts': int(ts[t2]), 'test1_ts': int(ts[test1_i]), 'c1_ts': int(ts[lv['c1']]),
         })
     cands.sort(key=lambda e: e['ready_ts'])
     return cands
 
 
-def _limit_fill(m5, ev):
-    """Simulasi limit entry di M5, meniru bot:
-    - Limit TEST1 dipasang begitu candle TEST2 closed (ready_ts + 1 jam).
-    - TEST3 aktif & valid (tidak di sisi salah SL): begitu candle TEST3 closed
-      (ready_ts + 2 jam) limit pindah ke wick TEST3; kadaluarsa EXPIRE_CANDLES jam
-      setelah TEST3. Selain itu limit TEST1 kadaluarsa EXPIRE_CANDLES jam setelah TEST2.
-      (Bot mengecek expire memakai candle H1 terakhir closed, jadi waktu batalnya
-      = open ts + (EXPIRE_CANDLES + 1) jam.)
-    - Fill: Long -> low M5 <= entry; Short -> high M5 >= entry (wick cukup).
-    Return (status, idx, entry_price, used_t3, end_ts):
-      'fill' | 'expired' | 'pending' (data M5 habis sebelum jendela selesai)."""
-    TS, H, L = m5['TS'], m5['H'], m5['L']
-    d, sl = ev['direction'], ev['sl_price']
-    ready = ev['ready_ts']
-    e3, t3ts = ev['entry_price_t3'], ev['test3_ts']
-    t3_ok = bool(ENABLE_TEST3 and e3 is not None and t3ts is not None
-                 and ((e3 > sl) if d == 'Long' else (e3 < sl)))
-    start1 = ready + H1_MS
-    if t3_ok:
-        sw = t3ts + H1_MS
-        end_final = t3ts + (EXPIRE_CANDLES + 1) * H1_MS
-        windows = [(start1, sw, ev['entry_price'], False), (sw, end_final, e3, True)]
-    else:
-        end_final = ready + (EXPIRE_CANDLES + 1) * H1_MS
-        windows = [(start1, end_final, ev['entry_price'], False)]
-
-    for ws, we, price, is_t3 in windows:
-        a = int(np.searchsorted(TS, ws, side='left'))
-        b = int(np.searchsorted(TS, we, side='left'))
-        if b <= a:
-            continue
-        seg = (L[a:b] <= price) if d == 'Long' else (H[a:b] >= price)
-        if seg.any():
-            return 'fill', a + int(seg.argmax()), float(price), is_t3, end_final
-    if len(TS) == 0 or int(TS[-1]) + M5_MS < end_final:
-        return 'pending', None, None, False, end_final
-    return 'expired', None, None, False, end_final
+def _rsi_entry(m5, ev):
+    """Monitoring M5 dgn RSI setelah candle H1 TEST2 closed.
+    - Candle M5 pertama yang dinilai = open-nya tepat saat H1 TEST2 closed
+      (ready_ts + 1 jam); dinilai saat candle itu CLOSED (RSI dari close-nya).
+    - Long: RSI < RSI_LONG_MAX; Short: RSI > RSI_SHORT_MIN -> ENTRY MARKET di close
+      candle sinyal. Posisi aktif mulai candle M5 berikutnya (fill_ts).
+    - Dipantau terus sampai entry atau kadaluarsa: EXPIRE_CANDLES candle H1 setelah
+      TEST2 (candle M5 dgn open >= ready_ts + (EXPIRE_CANDLES + 1) jam tidak dihitung).
+    Return (status, signal_idx, entry_price, end_ts): 'fill' | 'expired' | 'pending'."""
+    TS, C, RSI = m5['TS'], m5['C'], m5['RSI']
+    d = ev['direction']
+    start = ev['ready_ts'] + H1_MS
+    end_ts = ev['ready_ts'] + (EXPIRE_CANDLES + 1) * H1_MS
+    a = int(np.searchsorted(TS, start, side='left'))
+    b = int(np.searchsorted(TS, end_ts, side='left'))
+    if b > a:
+        seg = RSI[a:b]
+        mask = (seg < RSI_LONG_MAX) if d == 'Long' else (seg > RSI_SHORT_MIN)   # NaN -> False
+        if mask.any():
+            idx = a + int(mask.argmax())
+            if idx + 1 < len(TS):
+                return 'fill', idx, float(C[idx]), end_ts
+            return 'pending', None, None, end_ts   # tidak ada candle setelah sinyal
+    if len(TS) == 0 or int(TS[-1]) + M5_MS < end_ts:
+        return 'pending', None, None, end_ts
+    return 'expired', None, None, end_ts
 
 
 def detect_snr_events(df, m5):
-    """Level -> TEST1/TEST2 -> limit entry (TEST1, atau TEST3) -> fill di M5.
+    """Level -> TEST1/TEST2 -> monitoring M5 RSI -> entry market, SL fix SL_PCT.
     Dedup seperti bot: sinyal searah di koin yang sama dibuang kalau masih ada
-    sinyal menunggu (belum fill/kadaluarsa) saat TEST2-nya closed. Posisi aktif
+    sinyal menunggu (belum entry/kadaluarsa) saat TEST2-nya closed. Posisi aktif
     searah ditangani di simulasi (open_trade).
     Return (events, stats). events urut fill_ts, dict:
-    {'kind','type','level','direction','entry_price','sl_price','fill_ts','used_t3',
-     'test1_ts','test2_ts','c1_ts'}"""
+    {'kind','type','level','direction','entry_price','sl_price','fill_ts',
+     'test1_ts','test2_ts','c1_ts'}  (fill_ts = open candle M5 SETELAH candle sinyal)"""
     stats = {'levels': 0, 'entry': 0, 'no_test1': 0, 'test2_fail': 0, 'dup': 0,
-             'expired': 0, 'pending': 0, 't3': 0}
+             'expired': 0, 'pending': 0}
     events = []
     cands = _test_candidates(df, stats)
     if m5 is None:
@@ -438,7 +419,7 @@ def detect_snr_events(df, m5):
         if ev['ready_ts'] + H1_MS < busy_until[d]:
             stats['dup'] += 1      # masih ada sinyal searah menunggu -> dibuang
             continue
-        status, f, price, used_t3, end_ts = _limit_fill(m5, ev)
+        status, idx, price, end_ts = _rsi_entry(m5, ev)
         if status == 'expired':
             stats['expired'] += 1
             busy_until[d] = end_ts
@@ -447,22 +428,14 @@ def detect_snr_events(df, m5):
             stats['pending'] += 1
             busy_until[d] = end_ts
             continue
-        fill_ts = int(m5['TS'][f])
+        fill_ts = int(m5['TS'][idx + 1])
         busy_until[d] = fill_ts
-
-        # pengaman jarak minimum entry-SL (sama dgn place_limit_order bot)
-        sl = ev['sl_price']
-        dist = abs(price - sl)
-        min_dist = price * MIN_DIST_PCT
-        if dist < min_dist:
-            sl = price - min_dist if d == 'Long' else price + min_dist
+        sl = price * (1 - SL_PCT) if d == 'Long' else price * (1 + SL_PCT)
 
         stats['entry'] += 1
-        if used_t3:
-            stats['t3'] += 1
         events.append({
             'kind': ev['kind'], 'type': ev['type'], 'level': ev['level'], 'direction': d,
-            'entry_price': price, 'sl_price': sl, 'fill_ts': fill_ts, 'used_t3': used_t3,
+            'entry_price': price, 'sl_price': sl, 'fill_ts': fill_ts,
             'test1_ts': ev['test1_ts'], 'test2_ts': ev['ready_ts'], 'c1_ts': ev['c1_ts'],
         })
 
@@ -471,7 +444,7 @@ def detect_snr_events(df, m5):
 
 
 def detect_all_events(df, m5):
-    """Support & Resistance + EMA cross + TEST1/TEST2 -- SNR_SUPPORT (Long) dan
+    """Support & Resistance + EMA cross + TEST1/TEST2 + RSI M5 -- SNR_SUPPORT (Long) dan
     SNR_RESISTANCE (Short). Dedup: (kind, level, fill_ts) sama persis = 1 sinyal."""
     events, stats = detect_snr_events(df, m5)
     seen = set()
@@ -490,14 +463,41 @@ def detect_all_events(df, m5):
 # STRUKTUR M5 UTK LOOKUP CEPAT
 # ============================================================
 
+def _rsi_wilder(close, period):
+    """RSI Wilder (RMA) -- sama dgn RSI standar TradingView/Bybit. NaN sebelum cukup data."""
+    n = len(close)
+    rsi = np.full(n, np.nan)
+    if n <= period:
+        return rsi
+    diff = np.diff(close)
+    gain = np.where(diff > 0, diff, 0.0)
+    loss = np.where(diff < 0, -diff, 0.0)
+    avg_g = float(gain[:period].mean())
+    avg_l = float(loss[:period].mean())
+
+    def _val(g, l):
+        if l == 0:
+            return 50.0 if g == 0 else 100.0
+        return 100.0 - 100.0 / (1.0 + g / l)
+
+    rsi[period] = _val(avg_g, avg_l)
+    for i in range(period + 1, n):
+        avg_g = (avg_g * (period - 1) + gain[i - 1]) / period
+        avg_l = (avg_l * (period - 1) + loss[i - 1]) / period
+        rsi[i] = _val(avg_g, avg_l)
+    return rsi
+
+
 def prepare_m5(df_m5):
     if df_m5 is None or df_m5.empty:
         return None
     df_m5 = df_m5.sort_values('ts').reset_index(drop=True)
+    close = df_m5['close'].values.astype(float)
     return {
         'TS': df_m5['ts'].values.astype(np.int64),
         'O': df_m5['open'].values, 'H': df_m5['high'].values,
         'L': df_m5['low'].values, 'C': df_m5['close'].values,
+        'RSI': _rsi_wilder(close, RSI_PERIOD),
     }
 
 
@@ -521,8 +521,8 @@ def prepare_coin(symbol, df, m5):
 # SIMULASI GABUNGAN (semua koin, 1 balance, 1 pool slot)
 # ============================================================
 #
-# Tiap event dari detect_all_events() SUDAH final: limit sudah terfill di fill_ts
-# (entry_price = wick TEST1 atau TEST3, sl_price = SL adaptif). Simulasi membuka
+# Tiap event dari detect_all_events() SUDAH final: entry market sudah terjadi di fill_ts
+# (entry_price = close candle M5 sinyal RSI, sl_price = SL fix SL_PCT). Simulasi membuka
 # posisi saat waktu (M5) sampai di fill_ts event itu. Kalau slot/margin/min order
 # tidak cukup, atau sudah ada posisi searah di koin yang sama, setup hangus.
 
@@ -577,7 +577,6 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'dist': dist, 'qty': qty, 'entry_ts': entry_ts, 'level': ev['level'],
             'kind': ev['kind'], 'margin': margin_needed,
             'c1_ts': ev['c1_ts'], 'test1_ts': ev['test1_ts'], 'test2_ts': ev['test2_ts'],
-            'used_t3': ev.get('used_t3', False),
             'trail_active': False, 'extreme': entry_price,   # high/low-water mark, mulai dari entry
         }
         total_margin_used += margin_needed
@@ -599,7 +598,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'symbol': pos['symbol'], 'direction': direction, 'entry': entry, 'sl': pos['sl'],
             'exit': exit_price, 'reason': reason, 'r_mult': r_mult, 'pnl_usd': pnl_net,
             'entry_ts': pos['entry_ts'], 'exit_ts': exit_ts, 'balance_after': balance,
-            'level': pos['level'], 'kind': pos['kind'], 'used_t3': pos['used_t3'],
+            'level': pos['level'], 'kind': pos['kind'],
             'level_formed_ts': pos['c1_ts'],
             'level_formed_wib': _fmt_wib(pos['c1_ts']),
             'test1_ts': pos['test1_ts'], 'test2_ts': pos['test2_ts'],
@@ -657,7 +656,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
                             if hi >= pos['sl'] - 1e-12:
                                 close_trade(key, pos['sl'], 'TRAIL', now_ts)
 
-        # 2) limit entry simbol ini terfill di candle ini (fill di harga entry).
+        # 2) entry market simbol ini terjadi di candle ini (open candle = harga entry).
         #    Slot/margin/min order tidak cukup -> setup hangus.
         #    Kalau candle fill yang sama juga sudah menyentuh SL -> langsung kena SL.
         plist = pending_fills.get(symbol)
@@ -844,9 +843,9 @@ def _run():
     try:
         _log_msg(f"🚀 Mulai backtest SNR (S&R + EMA{EMA_FAST}/{EMA_SLOW} cross + TEST1/TEST2 engulfing) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
         _log_msg(f"   Syarat: level c1-c2 (c3 bersih) + EMA cross searah di c2-c4 -> TEST1 (sentuh level) -> TEST2 engulfing "
-                  f"(body>body TEST1, body>total wick) -> LIMIT di wick TEST1 (TEST3 {'AKTIF' if ENABLE_TEST3 else 'nonaktif'}, "
-                  f"kadaluarsa {EXPIRE_CANDLES} candle H1)  "
-                  f"SL adaptif wick TEST2 (min {SL_MIN_PCT*100:.2f}%)  "
+                  f"(body>body TEST1, body>total wick, sisi berlawanan tidak melebihi TEST1) -> monitoring M5 RSI{RSI_PERIOD} "
+                  f"(Long<{RSI_LONG_MAX:g}, Short>{RSI_SHORT_MIN:g}) -> entry market, kadaluarsa {EXPIRE_CANDLES} candle H1  "
+                  f"SL fix {SL_PCT*100:.2f}%  "
                   f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
 
         coins = {}
@@ -867,9 +866,9 @@ def _run():
                 n_by_kind[ev['kind']] = n_by_kind.get(ev['kind'], 0) + 1
             kind_str = ', '.join(f"{k}:{v}" for k, v in sorted(n_by_kind.items()))
             st = cp['stats']
-            _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['entry']} limit terisi ({kind_str or '-'}; {st['t3']} via TEST3), "
+            _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['entry']} entry market ({kind_str or '-'}), "
                       f"{st['no_test1']} tanpa TEST1, {st['test2_fail']} gagal TEST2, {st['dup']} dibuang (sinyal searah masih menunggu), "
-                      f"{st['expired']} limit kadaluarsa, {st['pending']} belum terisi (data habis).")
+                      f"{st['expired']} kadaluarsa tanpa sinyal RSI, {st['pending']} belum selesai (data habis).")
 
         _log_msg(f"🧮 Menjalankan simulasi gabungan ({len(coins)} koin)...")
         result = run_combined_backtest(coins, m5_data)
@@ -900,7 +899,6 @@ def _run():
                 'blocked_by_dup': result['blocked_by_dup'],
                 'levels_count': sum_st('levels'),
                 'filled_count': sum_st('entry'),
-                't3_count': sum_st('t3'),
                 'no_test1_count': sum_st('no_test1'),
                 'test2_fail_count': sum_st('test2_fail'),
                 'dup_signal_count': sum_st('dup'),
@@ -1019,7 +1017,7 @@ def _render_html() -> bytes:
 </style>
 </head>
 <body>
-  <h1>📊 Backtest SNR (S&R + EMA{EMA_FAST}/{EMA_SLOW} cross + TEST1/TEST2 engulfing)</h1>
+  <h1>📊 Backtest SNR (S&R + EMA{EMA_FAST}/{EMA_SLOW} cross + TEST1/TEST2 + RSI{RSI_PERIOD} M5)</h1>
   {status_html}
 
   <div class="cards">
@@ -1037,20 +1035,22 @@ def _render_html() -> bytes:
     Wajib ada <b>EMA{EMA_FAST}/{EMA_SLOW} cross searah</b> di salah satu c2, c3, atau c4 (Support → golden cross, Resistance → death cross).
     <br>• <b>TEST1</b>: candle pertama setelah c3 yang wick/body-nya menyentuh/melebihi level.
     <b>TEST2</b>: candle tepat sesudahnya harus <b>engulfing</b> (Support: ujung body &gt; high TEST1; Resistance: ujung body &lt; low TEST1),
-    body TEST2 &gt; body TEST1, dan body TEST2 &gt; total wick TEST2. Gagal → level gugur.
-    <br>• <b>ENTRY</b>: LIMIT di ujung wick TEST1 (Long → high, Short → low) setelah TEST2 closed.
-    <b>TEST3</b> ({'aktif' if ENABLE_TEST3 else 'nonaktif'}): kalau belum fill sampai candle TEST3 closed, entry pindah ke wick TEST3
-    (Long → low, Short → high). Limit kadaluarsa <b>{EXPIRE_CANDLES} candle H1</b> setelah TEST2 (atau TEST3). Tiap level dipakai 1x;
-    sinyal searah dibuang kalau masih ada sinyal menunggu / posisi aktif searah di koin yang sama.
-    <br>• <b>SL adaptif</b> di ujung wick TEST2 (min <b>{SL_MIN_PCT*100:.2f}%</b> dari entry). Jarak entry–SL = 1R untuk ukuran posisi.
+    body TEST2 &gt; body TEST1, body TEST2 &gt; total wick TEST2, dan sisi berlawanan tidak boleh melebihi TEST1
+    (Long: low TEST2 tidak di bawah low TEST1; Short: high TEST2 tidak di atas high TEST1). Gagal → level gugur.
+    <br>• <b>ENTRY</b>: setelah candle H1 TEST2 closed, monitoring <b>M5</b> dimulai dari candle M5 yang open-nya tepat saat H1 closed
+    (dinilai saat M5 closed). <b>RSI{RSI_PERIOD}</b> M5: Long → RSI &lt; {RSI_LONG_MAX:g}, Short → RSI &gt; {RSI_SHORT_MIN:g}.
+    Begitu terpenuhi → <b>entry market</b> (di close candle itu). Dipantau terus sampai entry atau kadaluarsa
+    <b>{EXPIRE_CANDLES} candle H1</b> setelah TEST2. Tiap level dipakai 1x; sinyal searah dibuang kalau masih ada
+    sinyal menunggu / posisi aktif searah di koin yang sama.
+    <br>• <b>SL fix {SL_PCT*100:.2f}%</b> dari entry (= 1R untuk ukuran posisi).
     <b>Trailing stop</b>: aktif di <b>{TRAIL_ACTIVATE_R:.1f}R</b>, SL mengikuti <b>{TRAIL_STOP_R:.1f}R</b> di belakang harga ekstrem (dipantau M5).
     Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>.
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
-    Level terdeteksi: {cr.get('levels_count',0)}. Limit terisi: {cr.get('filled_count',0)} (via TEST3: {cr.get('t3_count',0)}).
+    Level terdeteksi: {cr.get('levels_count',0)}. Entry market: {cr.get('filled_count',0)}.
     Gugur — tanpa TEST1: {cr.get('no_test1_count',0)}, gagal TEST2: {cr.get('test2_fail_count',0)},
-    sinyal searah masih menunggu: {cr.get('dup_signal_count',0)}, limit kadaluarsa: {cr.get('expired_count',0)},
-    belum terisi (data habis): {cr.get('pending_count',0)}.
-    Sinyal terblokir saat fill — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
+    sinyal searah masih menunggu: {cr.get('dup_signal_count',0)}, kadaluarsa tanpa sinyal RSI: {cr.get('expired_count',0)},
+    belum selesai (data habis): {cr.get('pending_count',0)}.
+    Sinyal terblokir saat entry — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
     min order: {cr.get('blocked_by_min_order',0)}, posisi searah masih aktif: {cr.get('blocked_by_dup',0)}.
     <br>Unduh semua trade: <a href="/trades.csv">/trades.csv</a> &nbsp;|&nbsp;
     Log mentah: <a href="/logs">/logs</a>
@@ -1108,13 +1108,13 @@ def _hasil_str(t):
     return 'SL'
 
 
-CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Test1', 'Test2', 'Entry', 'Tipe', 'Entry time']
+CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Test1', 'Test2', 'Entry', 'Entry time']
 
 
 def _trades_csv() -> bytes:
     """trades.csv ringkas, waktu dalam WIB (UTC+7). Test1 / Test2 = waktu OPEN candle
-    H1 TEST1 / TEST2; Entry = harga limit (wick TEST1 atau TEST3); Tipe = T1/T3;
-    Entry time = waktu OPEN candle M5 tempat limit terisi."""
+    H1 TEST1 / TEST2; Entry = harga market (close candle M5 sinyal RSI);
+    Entry time = waktu OPEN candle M5 saat posisi aktif (candle setelah sinyal)."""
     with _lock:
         trades_cp = list(_all_trades)
     buf = io.StringIO()
@@ -1125,7 +1125,7 @@ def _trades_csv() -> bytes:
             t['symbol'], t['direction'].upper(), _hasil_str(t), _fmt_price(t['level']),
             _fmt_wib_short(t['level_formed_ts']), _fmt_wib_short(t['test1_ts']),
             _fmt_wib_short(t['test2_ts']), _fmt_price(t['entry']),
-            'T3' if t.get('used_t3') else 'T1', _fmt_wib_short(t['entry_ts']),
+            _fmt_wib_short(t['entry_ts']),
         ])
     return buf.getvalue().encode('utf-8')
 
