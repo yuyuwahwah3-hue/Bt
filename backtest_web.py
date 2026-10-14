@@ -31,14 +31,24 @@ RINGKASAN STRATEGI
 3) ENTRY -- setelah candle H1 TEST2 closed, MONITORING M5 dengan RSI(RSI_PERIOD=5).
    Candle M5 pertama yang dinilai = yang open-nya tepat saat H1 TEST2 closed (mis. H1
    14:00 closed -> M5 15:00, bukan 14:55); tiap candle dinilai saat CLOSED.
-   Long -> RSI < 20; Short -> RSI > 50. Begitu terpenuhi -> ENTRY MARKET (di close
-   candle M5 itu, posisi aktif mulai candle M5 berikutnya). Dipantau terus sampai
+   AREA ENTRY: batas = ujung candle H1 SEBELUM TEST1 (Long -> HIGH-nya, Short -> LOW-nya).
+   Long : hanya BODY candle M5 yang sepenuhnya di BAWAH batas (max(open,close) < batas)
+          yang boleh dipakai. Body di atas batas / menembus batas (di tengah) -> tidak
+          dipakai, tunggu candle berikutnya. Short: kebalikannya (min(open,close) > batas).
+          Ujung body TEPAT di batas = DI LUAR area. Yang dihitung hanya BODY: wick yang
+          keluar area tidak masalah selama body-nya di dalam area.
+   RSI: Long -> RSI < 20; Short -> RSI > 50. Candle yang RSI-nya cocok TAPI body di luar
+   area tidak dipakai; terus menunggu. Begitu body di area DAN RSI cocok -> ENTRY MARKET
+   (di close candle M5 itu, posisi aktif mulai candle M5 berikutnya). Dipantau terus sampai
    entry atau kadaluarsa EXPIRE_CANDLES (4) candle H1 setelah TEST2. Tiap level 1x.
    Sinyal searah baru dibuang kalau masih ada sinyal menunggu / posisi aktif searah
    di koin yang sama.
 
-4) STOP LOSS FIX SL_PCT (1.5%) dari entry. Jarak entry-SL = 1R untuk ukuran posisi
-   (risiko RISK_PCT dari balance).
+4) STOP LOSS = PERGERAKAN TERJAUH + SL_BUFFER_PCT (0.25%). Pergerakan terjauh = low
+   terendah (Long) / high tertinggi (Short) yang dicapai sejak candle M5 PERTAMA yang
+   masuk area entry sampai candle entry (inklusif), sebelum RSI valid dan entry. SL =
+   ekstrem tsb digeser 0.25% menjauh (Long: x0.9975, Short: x1.0025). Jarak entry-SL = 1R
+   untuk ukuran posisi (risiko RISK_PCT dari balance).
    TRAILING STOP: aktif di TRAIL_ACTIVATE_R (3R), SL mengikuti TRAIL_STOP_R (1R) di
    belakang harga ekstrem (dipantau M5). Kalau di candle M5 yg sama harga menyentuh
    SL dan trailing aktif/naik sekaligus -> yg dihitung SL (SL dicek duluan).
@@ -68,14 +78,14 @@ from pybit.unified_trading import HTTP
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))   # modal awal, 1 akun bersama
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk per trade dari balance (compound)
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 EMA_FAST         = int(os.environ.get('EMA_FAST', 4))
 EMA_SLOW         = int(os.environ.get('EMA_SLOW', 10))
 EXPIRE_CANDLES   = int(os.environ.get('EXPIRE_CANDLES', 4))          # entry kadaluarsa N candle H1 setelah TEST2 closed
-SL_PCT           = float(os.environ.get('SL_PCT', '0.014'))          # SL FIX 1.5% dari entry
+SL_BUFFER_PCT    = float(os.environ.get('SL_BUFFER_PCT', '0.0025'))  # SL = pergerakan terjauh di area entry + 0.25%
 RSI_PERIOD       = int(os.environ.get('RSI_PERIOD', 5))              # RSI M5
 RSI_LONG_MAX     = float(os.environ.get('RSI_LONG_MAX', '20'))       # Long entry kalau RSI < 20
 RSI_SHORT_MIN    = float(os.environ.get('RSI_SHORT_MIN', '50'))      # Short entry kalau RSI > 50
@@ -85,7 +95,7 @@ TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))      # setelah a
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
 
-MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '0').strip().lower()
+MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '10').strip().lower()
 MAX_CONCURRENT = float('inf') if MAX_CONCURRENT_RAW in ('', '0', 'unlimited', 'inf') else int(MAX_CONCURRENT_RAW)
 
 ALLOW_HEDGE      = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
@@ -367,9 +377,11 @@ def _test_candidates(df, stats):
             continue
 
         direction = 'Long' if ty == 'support' else 'Short'
+        # batas AREA ENTRY = ujung candle H1 sebelum TEST1 (Long -> high, Short -> low)
+        zone_edge = float(h[test1_i - 1]) if direction == 'Long' else float(l[test1_i - 1])
         cands.append({
             'kind': 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE',
-            'type': ty, 'level': level, 'direction': direction,
+            'type': ty, 'level': level, 'direction': direction, 'zone_edge': zone_edge,
             'ready_ts': int(ts[t2]), 'test1_ts': int(ts[test1_i]), 'c1_ts': int(ts[lv['c1']]),
         })
     cands.sort(key=lambda e: e['ready_ts'])
@@ -377,35 +389,59 @@ def _test_candidates(df, stats):
 
 
 def _rsi_entry(m5, ev):
-    """Monitoring M5 dgn RSI setelah candle H1 TEST2 closed.
+    """Monitoring M5 dgn RSI + AREA ENTRY setelah candle H1 TEST2 closed.
     - Candle M5 pertama yang dinilai = open-nya tepat saat H1 TEST2 closed
       (ready_ts + 1 jam); dinilai saat candle itu CLOSED (RSI dari close-nya).
-    - Long: RSI < RSI_LONG_MAX; Short: RSI > RSI_SHORT_MIN -> ENTRY MARKET di close
-      candle sinyal. Posisi aktif mulai candle M5 berikutnya (fill_ts).
+    - AREA ENTRY (batas ev['zone_edge'] = ujung candle H1 sebelum TEST1):
+        Long : body M5 sepenuhnya di bawah batas  -> max(open, close) < batas
+        Short: body M5 sepenuhnya di atas batas   -> min(open, close) > batas
+      Body di luar area, menembus batas, atau ujung body TEPAT di batas -> candle
+      tidak dipakai. Hanya BODY yang dihitung; wick boleh keluar area.
+    - Long: RSI < RSI_LONG_MAX; Short: RSI > RSI_SHORT_MIN. Entry = candle PERTAMA yang
+      body-nya di area DAN RSI cocok -> ENTRY MARKET di close candle itu; posisi aktif
+      mulai candle M5 berikutnya (fill_ts).
+    - SL = pergerakan terjauh + SL_BUFFER_PCT: low terendah (Long) / high tertinggi
+      (Short) dari candle M5 pertama yang masuk area sampai candle entry (inklusif).
     - Dipantau terus sampai entry atau kadaluarsa: EXPIRE_CANDLES candle H1 setelah
       TEST2 (candle M5 dgn open >= ready_ts + (EXPIRE_CANDLES + 1) jam tidak dihitung).
-    Return (status, signal_idx, entry_price, end_ts): 'fill' | 'expired' | 'pending'."""
-    TS, C, RSI = m5['TS'], m5['C'], m5['RSI']
+    Return (status, signal_idx, entry_price, end_ts, sl_price):
+      status 'fill' | 'expired' | 'pending'."""
+    TS, O, H, L, C, RSI = m5['TS'], m5['O'], m5['H'], m5['L'], m5['C'], m5['RSI']
     d = ev['direction']
+    edge = ev['zone_edge']
     start = ev['ready_ts'] + H1_MS
     end_ts = ev['ready_ts'] + (EXPIRE_CANDLES + 1) * H1_MS
     a = int(np.searchsorted(TS, start, side='left'))
     b = int(np.searchsorted(TS, end_ts, side='left'))
     if b > a:
-        seg = RSI[a:b]
-        mask = (seg < RSI_LONG_MAX) if d == 'Long' else (seg > RSI_SHORT_MIN)   # NaN -> False
-        if mask.any():
-            idx = a + int(mask.argmax())
-            if idx + 1 < len(TS):
-                return 'fill', idx, float(C[idx]), end_ts
-            return 'pending', None, None, end_ts   # tidak ada candle setelah sinyal
+        if d == 'Long':
+            in_zone = np.maximum(O[a:b], C[a:b]) < edge
+            rsi_ok = RSI[a:b] < RSI_LONG_MAX            # NaN -> False
+        else:
+            in_zone = np.minimum(O[a:b], C[a:b]) > edge
+            rsi_ok = RSI[a:b] > RSI_SHORT_MIN
+        valid = in_zone & rsi_ok
+        if valid.any():
+            k = int(valid.argmax())                      # entry (relatif terhadap a)
+            first_zone = int(in_zone.argmax())           # candle pertama yang masuk area (<= k)
+            idx = a + k
+            if idx + 1 >= len(TS):
+                return 'pending', None, None, end_ts, None   # tidak ada candle setelah sinyal
+            if d == 'Long':
+                extreme = float(L[a + first_zone: idx + 1].min())
+                sl = extreme * (1 - SL_BUFFER_PCT)
+            else:
+                extreme = float(H[a + first_zone: idx + 1].max())
+                sl = extreme * (1 + SL_BUFFER_PCT)
+            return 'fill', idx, float(C[idx]), end_ts, sl
     if len(TS) == 0 or int(TS[-1]) + M5_MS < end_ts:
-        return 'pending', None, None, end_ts
-    return 'expired', None, None, end_ts
+        return 'pending', None, None, end_ts, None
+    return 'expired', None, None, end_ts, None
 
 
 def detect_snr_events(df, m5):
-    """Level -> TEST1/TEST2 -> monitoring M5 RSI -> entry market, SL fix SL_PCT.
+    """Level -> TEST1/TEST2 -> monitoring M5 (area entry + RSI) -> entry market,
+    SL = pergerakan terjauh di area + SL_BUFFER_PCT.
     Dedup seperti bot: sinyal searah di koin yang sama dibuang kalau masih ada
     sinyal menunggu (belum entry/kadaluarsa) saat TEST2-nya closed. Posisi aktif
     searah ditangani di simulasi (open_trade).
@@ -426,7 +462,7 @@ def detect_snr_events(df, m5):
         if ev['ready_ts'] + H1_MS < busy_until[d]:
             stats['dup'] += 1      # masih ada sinyal searah menunggu -> dibuang
             continue
-        status, idx, price, end_ts = _rsi_entry(m5, ev)
+        status, idx, price, end_ts, sl = _rsi_entry(m5, ev)
         if status == 'expired':
             stats['expired'] += 1
             busy_until[d] = end_ts
@@ -437,7 +473,6 @@ def detect_snr_events(df, m5):
             continue
         fill_ts = int(m5['TS'][idx + 1])
         busy_until[d] = fill_ts
-        sl = price * (1 - SL_PCT) if d == 'Long' else price * (1 + SL_PCT)
 
         stats['entry'] += 1
         events.append({
@@ -529,7 +564,7 @@ def prepare_coin(symbol, df, m5):
 # ============================================================
 #
 # Tiap event dari detect_all_events() SUDAH final: entry market sudah terjadi di fill_ts
-# (entry_price = close candle M5 sinyal RSI, sl_price = SL fix SL_PCT). Simulasi membuka
+# (entry_price = close candle M5 sinyal RSI di area entry, sl_price = pergerakan terjauh + 0.25%). Simulasi membuka
 # posisi saat waktu (M5) sampai di fill_ts event itu. Kalau slot/margin/min order
 # tidak cukup, atau sudah ada posisi searah di koin yang sama, setup hangus.
 
@@ -850,9 +885,9 @@ def _run():
     try:
         _log_msg(f"🚀 Mulai backtest SNR (S&R + EMA{EMA_FAST}/{EMA_SLOW} cross + TEST1/TEST2 engulfing) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
         _log_msg(f"   Syarat: level c1-c2 (c0 & c3 bersih) + EMA cross searah di c2-c4 -> TEST1 (sentuh level) -> TEST2 engulfing "
-                  f"(body>body TEST1, body>total wick, sisi berlawanan tidak melebihi TEST1) -> monitoring M5 RSI{RSI_PERIOD} "
+                  f"(body>body TEST1, body>total wick, sisi berlawanan tidak melebihi TEST1) -> monitoring M5 (body di area entry = ujung candle H1 sebelum TEST1) RSI{RSI_PERIOD} "
                   f"(Long<{RSI_LONG_MAX:g}, Short>{RSI_SHORT_MIN:g}) -> entry market, kadaluarsa {EXPIRE_CANDLES} candle H1  "
-                  f"SL fix {SL_PCT*100:.2f}%  "
+                  f"SL = pergerakan terjauh di area + {SL_BUFFER_PCT*100:.2f}%  "
                   f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
 
         coins = {}
@@ -1045,11 +1080,14 @@ def _render_html() -> bytes:
     body TEST2 &gt; body TEST1, body TEST2 &gt; total wick TEST2, dan sisi berlawanan tidak boleh melebihi TEST1
     (Long: low TEST2 tidak di bawah low TEST1; Short: high TEST2 tidak di atas high TEST1). Gagal → level gugur.
     <br>• <b>ENTRY</b>: setelah candle H1 TEST2 closed, monitoring <b>M5</b> dimulai dari candle M5 yang open-nya tepat saat H1 closed
-    (dinilai saat M5 closed). <b>RSI{RSI_PERIOD}</b> M5: Long → RSI &lt; {RSI_LONG_MAX:g}, Short → RSI &gt; {RSI_SHORT_MIN:g}.
-    Begitu terpenuhi → <b>entry market</b> (di close candle itu). Dipantau terus sampai entry atau kadaluarsa
+    (dinilai saat M5 closed). <b>Area entry</b>: batas = ujung candle H1 sebelum TEST1 (Long → high, Short → low).
+    Long: <b>body</b> M5 harus sepenuhnya di bawah batas; Short: sepenuhnya di atas batas. Body di luar area, menembus batas, atau ujung body tepat di batas → tidak dipakai (hanya body yang dihitung, wick boleh keluar area).
+    <b>RSI{RSI_PERIOD}</b> M5: Long → RSI &lt; {RSI_LONG_MAX:g}, Short → RSI &gt; {RSI_SHORT_MIN:g}.
+    Begitu body di area <b>dan</b> RSI cocok → <b>entry market</b> (di close candle itu). Dipantau terus sampai entry atau kadaluarsa
     <b>{EXPIRE_CANDLES} candle H1</b> setelah TEST2. Tiap level dipakai 1x; sinyal searah dibuang kalau masih ada
     sinyal menunggu / posisi aktif searah di koin yang sama.
-    <br>• <b>SL fix {SL_PCT*100:.2f}%</b> dari entry (= 1R untuk ukuran posisi).
+    <br>• <b>SL</b> = pergerakan terjauh di area entry (low terendah Long / high tertinggi Short sejak candle pertama masuk area
+    sampai candle entry) + <b>{SL_BUFFER_PCT*100:.2f}%</b> (= 1R untuk ukuran posisi).
     <b>Trailing stop</b>: aktif di <b>{TRAIL_ACTIVATE_R:.1f}R</b>, SL mengikuti <b>{TRAIL_STOP_R:.1f}R</b> di belakang harga ekstrem (dipantau M5).
     Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>.
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
