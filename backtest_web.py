@@ -11,7 +11,7 @@ Begitu body M5 break MASUK, candle BERIKUTNYA harus searah (Long: close > open-n
 sendiri; Short: close < open-nya), kalau tidak -> gugur. Setelah candle konfirmasi
 closed -> pasang LIMIT entry di angka level itu, fill saat harga retest level.
 SL = pergerakan terluar/terjauh harga dari level (sejak sentuhan pertama sampai
-candle konfirmasi) + buffer SL_BUFFER_PCT 0.2% dari level. Tidak ada EMA, tidak ada
+candle konfirmasi) + buffer SL_BUFFER_PCT 0.4% dari level. Tidak ada EMA, tidak ada
 level kedua, tidak ada filter wick.
 
 RINGKASAN STRATEGI
@@ -35,8 +35,10 @@ RINGKASAN STRATEGI
    Support:
      a) KELUAR : body M5 break PERTAMA DI BAWAH level (close M5 < level). Wick tidak
                  dihitung. Candle break (k) HARUS sebuah FVG yang melingkupi level:
-                   - candle SEBELUMNYA (k-1): ujung wick BAWAH (low) di ATAS level
-                   - candle SESUDAHNYA (k+1): ujung wick ATAS (high) di BAWAH level
+                   - candle SEBELUMNYA (k-1): ujung wick BAWAH (low) di ATAS level, dan
+                     candle itu TIDAK searah (bearish: close < open-nya sendiri)
+                   - candle SESUDAHNYA (k+1): ujung wick ATAS (high) di BAWAH level, dan
+                     MELEBIHI ujung candle break-out (low[k+1] < low[k]; wick atau body)
                  Kalau body break pertama itu BUKAN FVG -> setup langsung GUGUR dan
                  tidak dipantau lagi. FVG baru terkonfirmasi saat candle k+1 closed.
      b) MASUK  : setelah (a), candle PERTAMA yang close-nya kembali DI ATAS level HARUS
@@ -49,7 +51,8 @@ RINGKASAN STRATEGI
                  di bawah level (low <= level x 0.98) SEBELUM atau di candle yang
                  sama dengan (b) -> level gugur, tidak ada entry.
    Resistance: kebalikannya (KELUAR = body break pertama close M5 > level dengan FVG:
-   high candle k-1 di BAWAH level dan low candle k+1 di ATAS level; MASUK = candle
+   high candle k-1 di BAWAH level & k-1 bullish (close > open), low candle k+1 di ATAS
+   level & high[k+1] > high[k]; MASUK = candle
    pertama yang close di BAWAH level harus sekaligus close di BAWAH high[k-1], kalau
    tidak -> gugur; GUGUR 2% kalau high >= level x 1.02).
    Level yang belum pernah break body tetap dipantau (tidak ada batas waktu).
@@ -70,11 +73,11 @@ RINGKASAN STRATEGI
 4) STOP LOSS -- TIDAK fix. SL = PERGERAKAN TERLUAR / TERJAUH harga dari level (M5):
    dari SENTUHAN PERTAMA level (wick cukup) sampai candle KONFIRMASI (ikut dihitung),
    termasuk candle break-out, FVG sendiri, dan candle-candle sesudahnya.
-   BUFFER: SL digeser lagi SL_BUFFER_PCT (0.2% dari level) ke luar untuk keamanan.
+   BUFFER: SL digeser lagi SL_BUFFER_PCT (0.4% dari level) ke luar untuk keamanan.
    Support/Long: low terendah di rentang itu; Resistance/Short: high tertinggi.
    Contoh Long: harga terus turun sampai 1.4% di bawah level lalu balik dan break-in
-   -> SL di 1.4% + 0.2% = 1.6% dari level (terluar pasti < 2%, kalau sampai 2% level
-   sudah gugur; dengan buffer jarak SL bisa mendekati 2.2%).
+   -> SL di 1.4% + 0.4% = 1.8% dari level (terluar pasti < 2%, kalau sampai 2% level
+   sudah gugur; dengan buffer jarak SL bisa mendekati 2.4%).
    Kalau candle fill juga sudah menyentuh SL -> langsung kena SL.
    Ukuran posisi = risiko RISK_PCT / jarak entry-SL (jarak itu = 1R).
    TRAILING STOP: aktif di TRAIL_ACTIVATE_R (2R), SL mengikuti TRAIL_STOP_R (1R)
@@ -113,7 +116,7 @@ FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 LIMIT_EXPIRE_HOURS = float(os.environ.get('LIMIT_EXPIRE_HOURS', '4'))   # limit tidak terfill dalam N jam sejak candle MASUK closed -> gugur
 LEVEL_FAIL_PCT   = float(os.environ.get('LEVEL_FAIL_PCT', '0.02'))   # setelah body M5 break KELUAR, kalau harga sampai 2% dari level -> level gugur
-SL_BUFFER_PCT    = float(os.environ.get('SL_BUFFER_PCT', '0.002'))    # buffer SL +0.2% dari level di luar pergerakan terluar (mis. terluar 1.4% -> SL 1.6%)
+SL_BUFFER_PCT    = float(os.environ.get('SL_BUFFER_PCT', '0.004'))    # buffer SL +0.4% dari level di luar pergerakan terluar (mis. terluar 1.4% -> SL 1.8%)
 TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '2.0'))    # trailing aktif begitu profit capai 2R
 TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))       # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
 
@@ -390,7 +393,8 @@ def find_levels(df):
 def _m5_break_entry(m5, ty, level, start_ts):
     """Monitoring M5 satu level mulai start_ts (tanpa lookahead, semua pakai close candle).
     Support : KELUAR = body break PERTAMA close < level. Candle itu (k) harus FVG yang
-              melingkupi level: low[k-1] > level DAN high[k+1] < level. Bukan FVG ->
+              melingkupi level: low[k-1] > level DAN high[k+1] < level, plus k-1 bearish
+              (close < open) DAN low[k+1] < low[k]. Bukan FVG ->
               'nofvg' (setup gugur, tidak dipantau lagi).
               MASUK = candle PERTAMA setelah k yang close-nya > level; candle itu harus
               sekaligus close > low[k-1] (ujung atas FVG, harus melebihi). Kalau hanya
@@ -452,11 +456,20 @@ def _m5_break_entry(m5, ty, level, start_ts):
     if k >= n5 - 1:
         return 'waiting', k, None            # candle k+1 belum ada -> FVG belum terkonfirmasi
 
+    # Syarat tambahan FVG:
+    #  (1) candle SEBELUM break-out (k-1) harus TIDAK searah: Long -> close < open-nya sendiri;
+    #      Short -> close > open-nya sendiri.
+    #  (2) candle SESUDAH break-out (k+1) harus MELEBIHI ujung candle break-out (wick ATAU body):
+    #      Long -> low[k+1] < low[k]; Short -> high[k+1] > high[k].
     if ty == 'support':
-        is_fvg = L[k - 1] > level and H[k + 1] < level
+        is_fvg = (L[k - 1] > level and H[k + 1] < level
+                  and C[k - 1] < O[k - 1]
+                  and L[k + 1] < L[k])
         in_ref = float(L[k - 1])             # ujung bawah candle sebelum break-out = ujung atas FVG
     else:
-        is_fvg = H[k - 1] < level and L[k + 1] > level
+        is_fvg = (H[k - 1] < level and L[k + 1] > level
+                  and C[k - 1] > O[k - 1]
+                  and H[k + 1] > H[k])
         in_ref = float(H[k - 1])             # ujung atas candle sebelum break-out = ujung bawah FVG
     if not is_fvg:
         return 'nofvg', k, None
@@ -509,8 +522,8 @@ def _m5_extreme_sl(m5, ty, level, start_ts, m_in):
     dihitung) -- mencakup candle break-out, FVG sendiri, dan candle-candle sesudahnya.
     Support/Long : low terendah di rentang itu. Resistance/Short: high tertinggi.
     Rentang diperpanjang sampai candle KONFIRMASI (m_in dipanggil dgn index konfirmasi).
-    Ditambah buffer SL_BUFFER_PCT (0.2% dari level): terluar 1.4% -> SL 1.6%.
-    Karena gugur kalau menjauh >= LEVEL_FAIL_PCT (2%), jarak SL pasti < 2% + buffer.
+    Ditambah buffer SL_BUFFER_PCT (0.4% dari level): terluar 1.4% -> SL 1.8%.
+    Karena gugur kalau menjauh >= LEVEL_FAIL_PCT (2%), jarak SL pasti < 2% + buffer (maks sekitar 2.4%).
     Setelah candle MASUK, limit menunggu harga kembali ke level, jadi SL sudah final.
     Return float, atau None kalau tidak valid (SL harus benar-benar di luar level)."""
     TS, H, L = m5['TS'], m5['H'], m5['L']
@@ -526,7 +539,7 @@ def _m5_extreme_sl(m5, ty, level, start_ts, m_in):
         sl = float(L[t0:m_in + 1].min())
         if sl >= level - 1e-12:
             return None
-        return sl - SL_BUFFER_PCT * level      # buffer +0.2% dari level (terluar 1.4% -> SL 1.6%)
+        return sl - SL_BUFFER_PCT * level      # buffer +0.4% dari level (terluar 1.4% -> SL 1.8%)
     sl = float(H[t0:m_in + 1].max())
     if sl <= level + 1e-12:
         return None
@@ -1258,7 +1271,9 @@ def _render_html() -> bytes:
     <br>• <b>Monitoring M5</b> (setelah level siap): body M5 PERTAMA yang menembus level
     <b>KELUAR</b> (Support: close di bawah level; Resistance: close di atas) harus sebuah <b>FVG</b>
     yang melingkupi level (Support: low candle sebelumnya di atas level &amp; high candle sesudahnya
-    di bawah level; Resistance: kebalikannya). Kalau bukan FVG → setup langsung <b>gugur</b>, tidak
+    di bawah level; Resistance: kebalikannya). Syarat tambahan: candle <b>sebelum</b> break-out harus tidak searah
+    (Long: close di bawah open-nya; Short: close di atas open-nya), dan candle <b>sesudah</b> break-out harus
+    melebihi ujung candle break-out (Long: low-nya lebih rendah dari low candle break-out, wick atau body; Short: high-nya lebih tinggi). Kalau bukan FVG → setup langsung <b>gugur</b>, tidak
     dipantau lagi. Lalu candle M5 <b>PERTAMA</b> yang close-nya kembali ke sisi level harus <b>MASUK</b> dengan
     <b>menutup seluruh FVG</b> (Support: close di atas low candle sebelum break-out; Resistance: close di bawah
     high candle sebelum break-out; harus melebihi, sama tidak cukup). Kalau candle pertama itu hanya close
@@ -1276,7 +1291,7 @@ def _render_html() -> bytes:
     (wick cukup). Kalau tidak terisi dalam <b>{LIMIT_EXPIRE_HOURS:g} jam</b> sejak candle MASUK closed →
     limit batal, setup gugur. Tiap level HANYA dipakai 1x.
     <br>• <b>SL</b> = <b>pergerakan terluar/terjauh</b> harga dari level, sejak sentuhan pertama sampai candle MASUK
-    (Support: low terendah; Resistance: high tertinggi; selalu &lt; {LEVEL_FAIL_PCT*100:.0f}% dari level) <b>+ buffer {SL_BUFFER_PCT*100:.1f}%</b> dari level (mis. terluar 1.4% → SL 1.6%), bukan persen tetap. Jarak entry–SL = 1R untuk ukuran posisi.
+    (Support: low terendah; Resistance: high tertinggi; selalu &lt; {LEVEL_FAIL_PCT*100:.0f}% dari level) <b>+ buffer {SL_BUFFER_PCT*100:.1f}%</b> dari level (mis. terluar 1.4% → SL 1.8%), bukan persen tetap. Jarak entry–SL = 1R untuk ukuran posisi.
     <b>Trailing stop</b>: aktif begitu profit capai <b>{TRAIL_ACTIVATE_R:.1f}R</b>, lalu SL mengikuti
     <b>{TRAIL_STOP_R:.1f}R</b> di belakang harga tertinggi/terendah yang pernah dicapai (dipantau M5).
     Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>.
