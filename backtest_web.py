@@ -11,8 +11,8 @@ RINGKASAN STRATEGI
      Resistance: c1 bullish lalu c2 bearish. Level = close[c1].
    - KANAN: 1 candle setelah c2 (c3) -- wick-nya tidak boleh menyentuh level sama
      sekali (Support: low c3 > level; Resistance: high c3 < level).
-   - KIRI: 1 candle sebelum c1 (c0) -- juga tidak boleh melebihi level (Support:
-     low c0 > level; Resistance: high c0 < level; sama dengan level tidak lolos).
+   - KIRI: NONAKTIF (N_LEFT=0). Bisa dinyalakan lewat env N_LEFT=1 (candle 1 sebelum
+     c1 tidak boleh melebihi level).
      TANPA syarat wick c1/c2.
    - SYARAT EMA CROSS: salah satu dari candle c2, c3, atau c4 WAJIB jadi penyebab
      cross EMA4/EMA10 (dari close H1) yang searah -- Support -> GOLDEN CROSS,
@@ -20,7 +20,10 @@ RINGKASAN STRATEGI
 
 2) TEST1 + TEST2 (engulfing), setelah level terbentuk:
    - TEST1: candle pertama SETELAH c3 yang wick/body-nya menyentuh ATAU melebihi
-     level. Tidak ada syarat arah candle.
+     level. Tidak ada syarat arah candle TEST1 sendiri.
+   - FILTER: candle H1 TEPAT SEBELUM TEST1 harus BERLAWANAN arah dgn setup -- Long: close <
+     open (bearish); Short: close > open (bullish). Doji (close == open) tidak lolos.
+     Kalau gagal, level gugur.
    - TEST2: candle TEPAT SETELAH TEST1, harus ENGULFING -- Support: ujung body TEST2
      > high TEST1; Resistance: ujung body TEST2 < low TEST1. Plus body TEST2 harus
      lebih besar dari body TEST1 DAN lebih besar dari TOTAL wick TEST2 sendiri.
@@ -178,7 +181,7 @@ _combined_result = {
     'total_r': 0, 'avg_r': 0, 'final_balance': INITIAL_BALANCE,
     'blocked_by_slot': 0, 'blocked_by_margin': 0, 'blocked_by_min_order': 0,
     'blocked_by_invalid_sl': 0, 'blocked_by_dup': 0,
-    'no_test1_count': 0, 'test2_fail_count': 0, 'dup_signal_count': 0, 'expired_count': 0,
+    'no_test1_count': 0, 'prev_fail_count': 0, 'test2_fail_count': 0, 'dup_signal_count': 0, 'expired_count': 0,
     'pending_count': 0, 'levels_count': 0, 'filled_count': 0,
 }
 
@@ -281,7 +284,7 @@ def fetch_bybit_m5(symbol: str) -> pd.DataFrame:
 # ============================================================
 
 N_RIGHT  = 1       # candle kanan (c3) yang wajib bersih (wick tidak boleh menyentuh level)
-N_LEFT   = 1       # candle kiri (c0, sebelum c1) yang wajib bersih (tidak boleh melebihi level)
+N_LEFT   = int(os.environ.get('N_LEFT', 0))   # candle kiri (sebelum c1) yang wajib bersih; 0 = NONAKTIF (hanya kanan)
 WICK_EPS = 1e-9
 H1_MS    = 3600 * 1000
 M5_MS    = 5 * 60 * 1000
@@ -290,8 +293,8 @@ M5_MS    = 5 * 60 * 1000
 def find_levels(df):
     """Deteksi level Support & Resistance dari candle H1 (basis body candle).
     TANPA syarat wick c1/c2.
-    Syarat kiri : N_LEFT candle SEBELUM c1 (c0) tidak boleh melebihi level --
-                  Support: low > level; Resistance: high < level.
+    Syarat kiri : N_LEFT candle SEBELUM c1 tidak boleh melebihi level -- default
+                  N_LEFT=0 = NONAKTIF (Support: low > level; Resistance: high < level).
     Syarat kanan: N_RIGHT candle setelah c1,c2 (c3) -- wick tidak boleh menyentuh level.
     Syarat EMA CROSS di RENTANG c2-c4: cukup SALAH SATU dari c2, c3, ATAU c4 yang
     menjadi penyebab cross EMA_FAST/EMA_SLOW (dari close H1) yang searah --
@@ -357,6 +360,14 @@ def _test_candidates(df, stats):
             continue
         test1_i = start + int(seg.argmax())
         t2 = test1_i + 1
+
+        # FILTER: candle H1 sebelum TEST1 harus berlawanan arah dgn setup
+        # (Long -> bearish: close < open; Short -> bullish: close > open). Doji gugur.
+        pv = test1_i - 1
+        prev_ok = (c[pv] < o[pv]) if ty == 'support' else (c[pv] > o[pv])
+        if not prev_ok:
+            stats['prev_fail'] += 1
+            continue
 
         # TEST2: engulfing. Sisi BERLAWANAN tidak boleh melebihi TEST1 (wick/body):
         # Long -> low TEST2 tidak boleh di bawah low TEST1; Short -> high TEST2 tidak
@@ -448,7 +459,7 @@ def detect_snr_events(df, m5):
     Return (events, stats). events urut fill_ts, dict:
     {'kind','type','level','direction','entry_price','sl_price','fill_ts',
      'test1_ts','test2_ts','c1_ts'}  (fill_ts = open candle M5 SETELAH candle sinyal)"""
-    stats = {'levels': 0, 'entry': 0, 'no_test1': 0, 'test2_fail': 0, 'dup': 0,
+    stats = {'levels': 0, 'entry': 0, 'no_test1': 0, 'prev_fail': 0, 'test2_fail': 0, 'dup': 0,
              'expired': 0, 'pending': 0}
     events = []
     cands = _test_candidates(df, stats)
@@ -884,7 +895,7 @@ def _run():
     global _monthly_results, _avg_monthly_growth
     try:
         _log_msg(f"🚀 Mulai backtest SNR (S&R + EMA{EMA_FAST}/{EMA_SLOW} cross + TEST1/TEST2 engulfing) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
-        _log_msg(f"   Syarat: level c1-c2 (c0 & c3 bersih) + EMA cross searah di c2-c4 -> TEST1 (sentuh level) -> TEST2 engulfing "
+        _log_msg(f"   Syarat: level c1-c2 (c3 bersih) + EMA cross searah di c2-c4 -> TEST1 (sentuh level; candle H1 sebelumnya harus berlawanan arah) -> TEST2 engulfing "
                   f"(body>body TEST1, body>total wick, sisi berlawanan tidak melebihi TEST1) -> monitoring M5 (body di area entry = ujung candle H1 sebelum TEST1) RSI{RSI_PERIOD} "
                   f"(Long<{RSI_LONG_MAX:g}, Short>{RSI_SHORT_MIN:g}) -> entry market, kadaluarsa {EXPIRE_CANDLES} candle H1  "
                   f"SL = pergerakan terjauh di area + {SL_BUFFER_PCT*100:.2f}%  "
@@ -909,7 +920,7 @@ def _run():
             kind_str = ', '.join(f"{k}:{v}" for k, v in sorted(n_by_kind.items()))
             st = cp['stats']
             _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['entry']} entry market ({kind_str or '-'}), "
-                      f"{st['no_test1']} tanpa TEST1, {st['test2_fail']} gagal TEST2, {st['dup']} dibuang (sinyal searah masih menunggu), "
+                      f"{st['no_test1']} tanpa TEST1, {st['prev_fail']} gagal filter candle sebelum TEST1, {st['test2_fail']} gagal TEST2, {st['dup']} dibuang (sinyal searah masih menunggu), "
                       f"{st['expired']} kadaluarsa tanpa sinyal RSI, {st['pending']} belum selesai (data habis).")
 
         _log_msg(f"🧮 Menjalankan simulasi gabungan ({len(coins)} koin)...")
@@ -942,6 +953,7 @@ def _run():
                 'levels_count': sum_st('levels'),
                 'filled_count': sum_st('entry'),
                 'no_test1_count': sum_st('no_test1'),
+                'prev_fail_count': sum_st('prev_fail'),
                 'test2_fail_count': sum_st('test2_fail'),
                 'dup_signal_count': sum_st('dup'),
                 'expired_count': sum_st('expired'),
@@ -1073,9 +1085,10 @@ def _render_html() -> bytes:
 
   <div class="note">
     💡 <b>Strategi sama dengan bot (S&R + EMA cross + TEST1/TEST2 engulfing)</b>:
-    <br>• <b>Level</b> (H1): c1+c2 berlawanan arah, level = close c1. Candle c3 (kanan) dan candle c0 (1 sebelum c1, kiri) tidak boleh melebihi level (wick pun tidak).
+    <br>• <b>Level</b> (H1): c1+c2 berlawanan arah, level = close c1. Candle c3 (kanan) tidak boleh menyentuh/melebihi level (wick pun tidak). Syarat kiri nonaktif.
     Wajib ada <b>EMA{EMA_FAST}/{EMA_SLOW} cross searah</b> di salah satu c2, c3, atau c4 (Support → golden cross, Resistance → death cross).
     <br>• <b>TEST1</b>: candle pertama setelah c3 yang wick/body-nya menyentuh/melebihi level.
+    Candle H1 <b>tepat sebelum TEST1</b> harus berlawanan arah (Long: close &lt; open; Short: close &gt; open), kalau tidak level gugur.
     <b>TEST2</b>: candle tepat sesudahnya harus <b>engulfing</b> (Support: ujung body &gt; high TEST1; Resistance: ujung body &lt; low TEST1),
     body TEST2 &gt; body TEST1, body TEST2 &gt; total wick TEST2, dan sisi berlawanan tidak boleh melebihi TEST1
     (Long: low TEST2 tidak di bawah low TEST1; Short: high TEST2 tidak di atas high TEST1). Gagal → level gugur.
@@ -1092,7 +1105,7 @@ def _render_html() -> bytes:
     Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>.
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
     Level terdeteksi: {cr.get('levels_count',0)}. Entry market: {cr.get('filled_count',0)}.
-    Gugur — tanpa TEST1: {cr.get('no_test1_count',0)}, gagal TEST2: {cr.get('test2_fail_count',0)},
+    Gugur — tanpa TEST1: {cr.get('no_test1_count',0)}, gagal filter candle sebelum TEST1: {cr.get('prev_fail_count',0)}, gagal TEST2: {cr.get('test2_fail_count',0)},
     sinyal searah masih menunggu: {cr.get('dup_signal_count',0)}, kadaluarsa tanpa sinyal RSI: {cr.get('expired_count',0)},
     belum selesai (data habis): {cr.get('pending_count',0)}.
     Sinyal terblokir saat entry — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
