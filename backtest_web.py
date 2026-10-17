@@ -4,7 +4,7 @@ backtest_web.py — Backtest S&R H1 + FVG H1 + bias EMA21/30 + konfirmasi Invert
 RINGKASAN STRATEGI (Long; Short = cermin)
 1) LEVEL H1 (basis body): c1 bearish, c2 bullish, level = close[c1]; c3 tidak boleh menyentuh level (low[c3] > level).
    Tanpa EMA cross, tanpa TEST1/TEST2, tanpa RSI.
-2) FVG H1 searah di C1..C5: 3 candle berurutan (a,b,k=a+2; k <= c1+4) dgn gap low[k] > high[a] dan close[k] > high[b]
+2) FVG H1 searah di C1..C4 (env FVG_LAST_C): 3 candle berurutan (a,b,k=a+2; k <= c1+3) dgn gap low[k] > high[a] dan close[k] > high[b]
    (arah candle bebas). Level AKTIF saat candle k closed. Level gugur kalau sejak c4 s/d candle k harga menyentuh level.
 3) Filter level-berulang: kalau di antara c3 s/d candle penutup FVG muncul lagi pasangan 2-candle searah (bearish->bullish
    utk Long) -> level awal tidak valid.
@@ -24,7 +24,7 @@ Fee: masuk FEE_ENTRY_PCT (limit), keluar FEE_EXIT_PCT. Risk RISK_PCT dari balanc
 
 Deploy ke Railway: Start command -> python backtest_web.py ; buka domain Railway untuk lihat progress & hasil.
 Periode default: 1 tahun ke belakang (override: BACKTEST_START_DATE / BACKTEST_END_DATE).
-Env tambahan: EMA_BIAS_FILTER=1/0, BIAS_EMA_FAST=21, BIAS_EMA_SLOW=30, EMA_WARMUP=90, IFVG_LOOKBACK=48.
+Env tambahan: FVG_LAST_C=4, EMA_BIAS_FILTER=1/0, BIAS_EMA_FAST=21, BIAS_EMA_SLOW=30, EMA_WARMUP=90, IFVG_LOOKBACK=48.
 trades.csv (WIB): Koin, Dir, Hasil ('TP +x.xR' / 'SL'), Level, Terbentuk, Touch, IFVG, Limit, SL, Fill time, Exit, Exit time.
 """
 import os, threading, time, io, csv
@@ -49,6 +49,7 @@ EMA_BIAS_FILTER  = os.environ.get('EMA_BIAS_FILTER', '1').strip() not in ('0', '
 BIAS_EMA_FAST    = int(os.environ.get('BIAS_EMA_FAST', 21))
 BIAS_EMA_SLOW    = int(os.environ.get('BIAS_EMA_SLOW', 30))
 EMA_WARMUP       = int(os.environ.get('EMA_WARMUP', 90))             # level dgn candle FVG ke-k < ini dibuang
+FVG_LAST_C       = int(os.environ.get('FVG_LAST_C', 4))              # FVG H1 dicari di C1..C{FVG_LAST_C}
 IFVG_LOOKBACK    = int(os.environ.get('IFVG_LOOKBACK', 48))          # FVG tidak searah maks N candle M5 sebelum sentuh
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
@@ -266,14 +267,14 @@ def raw_levels(o, h, l, c):
 
 def activate_level(lv, H1, st):
     """Level jadi AKTIF saat FVG H1 searah selesai (candle ke-3 FVG closed).
-    FVG H1 di antara C1..C5 (3 candle berurutan a,b,k; k <= c1+4): gap saja, arah candle bebas.
+    FVG H1 di antara C1..C{FVG_LAST_C} (default C1..C4; 3 candle berurutan a,b,k; k <= c1+FVG_LAST_C-1): gap saja, arah candle bebas.
       Long : low(k) > high(a) DAN close(k) > high(b)     Short: high(k) < low(a) DAN close(k) < low(b)
     Level gugur kalau sejak c4 s/d candle penutup FVG harga sudah menyentuh level."""
     o, h, l, c, ts = H1['o'], H1['h'], H1['l'], H1['c'], H1['ts']
     n = len(c); i = lv['c1']; d = lv['d']; L = lv['L']; third = None
-    for a_ in (i, i + 1, i + 2):
+    for a_ in range(i, i + FVG_LAST_C - 2):
         k = a_ + 2
-        if k > i + 4 or k >= n:
+        if k > i + FVG_LAST_C - 1 or k >= n:
             continue
         b_ = a_ + 1
         if d == 'Long':
@@ -883,7 +884,7 @@ def _run():
     global _monthly_results, _avg_monthly_growth
     try:
         _log_msg(f"🚀 Mulai backtest SNR (level H1 + FVG H1 + bias EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW} + Inverted FVG M5, exit target level lawan) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
-        _log_msg(f"   Level c1/c2 (c3 bersih) + FVG H1 di C1..C5 + level tidak berulang sebelum FVG + bias EMA (filter={'ON' if EMA_BIAS_FILTER else 'OFF'}, warm-up {EMA_WARMUP}) "
+        _log_msg(f"   Level c1/c2 (c3 bersih) + FVG H1 di C1..C{FVG_LAST_C} + level tidak berulang sebelum FVG + bias EMA (filter={'ON' if EMA_BIAS_FILTER else 'OFF'}, warm-up {EMA_WARMUP}) "
                   f"-> sentuh -> IFVG M5 (lookback {IFVG_LOOKBACK}) -> LIMIT di IFVG, SL = kedalaman terjauh sejak sentuh, tanpa expired. "
                   f"Exit: TARGET = wick level lawan terbaru yang belum tersentuh (H1+FVG, tanpa EMA); SL dicek duluan.")
 
@@ -1070,7 +1071,7 @@ def _render_html() -> bytes:
 
   <div class="note">
     💡 <b>Strategi (level H1 + FVG H1 + Inverted FVG M5)</b>:
-    <br>• <b>Level</b> (H1): c1+c2 berlawanan arah, level = close c1; c3 tidak boleh menyentuh level. Wajib ada <b>FVG H1 searah</b> di C1..C5
+    <br>• <b>Level</b> (H1): c1+c2 berlawanan arah, level = close c1; c3 tidak boleh menyentuh level. Wajib ada <b>FVG H1 searah</b> di C1..C{FVG_LAST_C}
     (3 candle berurutan, gap saja; candle ke-3 close melewati wick candle ke-2). Level aktif saat FVG selesai. Gugur kalau harga sudah menyentuh level
     antara c4 s/d candle penutup FVG, atau kalau pasangan level searah muncul lagi sebelum FVG selesai.
     <br>• <b>Bias EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW}</b> (level awal saja): Long hanya kalau EMA{BIAS_EMA_FAST} &gt; EMA{BIAS_EMA_SLOW}, Short kalau &lt;
