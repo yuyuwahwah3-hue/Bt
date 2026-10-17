@@ -1,72 +1,32 @@
 """
-backtest_web.py — Backtest strategi Support & Resistance + EMA4/10 cross + TEST1/TEST2 engulfing
-================================================================================================
-Strategi disamakan PERSIS dengan bot_ema_flip.py (H1 untuk sinyal, M5 untuk simulasi
-fill/SL/trailing supaya urutan kejadian dalam candle H1 lebih akurat).
+backtest_web.py — Backtest S&R H1 + FVG H1 + bias EMA21/30 + konfirmasi Inverted FVG (M5), exit TARGET level lawan
+===================================================================================================================
+RINGKASAN STRATEGI (Long; Short = cermin)
+1) LEVEL H1 (basis body): c1 bearish, c2 bullish, level = close[c1]; c3 tidak boleh menyentuh level (low[c3] > level).
+   Tanpa EMA cross, tanpa TEST1/TEST2, tanpa RSI.
+2) FVG H1 searah di C1..C5: 3 candle berurutan (a,b,k=a+2; k <= c1+4) dgn gap low[k] > high[a] dan close[k] > high[b]
+   (arah candle bebas). Level AKTIF saat candle k closed. Level gugur kalau sejak c4 s/d candle k harga menyentuh level.
+3) Filter level-berulang: kalau di antara c3 s/d candle penutup FVG muncul lagi pasangan 2-candle searah (bearish->bullish
+   utk Long) -> level awal tidak valid.
+4) Filter bias EMA21 vs EMA30 (H1, hanya level awal; target exit TIDAK difilter): Long valid kalau EMA21 > EMA30, Short kalau
+   EMA21 < EMA30. Level dgn candle FVG ke-k < EMA_WARMUP (90) dibuang (EMA belum stabil di awal data).
+5) Level searah baru menggantikan level lama (tanpa expired).
+6) KONFIRMASI M5 (Inverted FVG): setelah level aktif -> tunggu SENTUH (low M5 <= level) -> FVG M5 searah (x1,x2,x3; x2
+   bullish; low[x3] > high[x1]) yang 'mengambil' gap FVG M5 tidak searah (y1,y2,y3; y2 bearish; high[y3] < low[y1]) yg
+   selesai sebelum x1 (mundur maks IFVG_LOOKBACK=48 candle dari candle sentuh; bagian overlap belum tersentuh). IFVG =
+   overlap; ENTRY LIMIT di tepi atas overlap. SL = low terdalam sejak candle sentuh s/d x3 (tanpa buffer). IFVG baru
+   sebelum fill -> limit dipindah. Fill = candle M5 pertama dgn low <= limit, harga fill = min(limit, open).
+7) EXIT: tanpa trailing. TARGET = ujung wick level LAWAN terbaru (H1 + FVG H1, tanpa EMA) yang belum tersentuh dan
+   berada di atas entry (Long: resistance, wick = high tertinggi c1/c2; Short: support, wick = low terendah). Target
+   berubah dinamis saat level lawan baru terbentuk / target lama tersentuh. SL dicek duluan dalam candle yang sama;
+   TP tidak dicek di candle fill. Posisi yg belum selesai di akhir data tidak dihitung.
+Fee: masuk FEE_ENTRY_PCT (limit), keluar FEE_EXIT_PCT. Risk RISK_PCT dari balance (compound), 1 posisi per arah per koin.
 
-RINGKASAN STRATEGI
-------------------
-1) DETEKSI LEVEL (H1, basis body candle):
-   - Support   : c1 bearish (close<open) lalu c2 bullish (close>open).
-     Resistance: c1 bullish lalu c2 bearish. Level = close[c1].
-   - KANAN: 1 candle setelah c2 (c3) -- wick-nya tidak boleh menyentuh level sama
-     sekali (Support: low c3 > level; Resistance: high c3 < level).
-   - KIRI: NONAKTIF (N_LEFT=0). Bisa dinyalakan lewat env N_LEFT=1 (candle 1 sebelum
-     c1 tidak boleh melebihi level).
-     TANPA syarat wick c1/c2.
-   - SYARAT EMA CROSS: salah satu dari candle c2, c3, atau c4 WAJIB jadi penyebab
-     cross EMA4/EMA10 (dari close H1) yang searah -- Support -> GOLDEN CROSS,
-     Resistance -> DEATH CROSS. Kalau tidak ada satupun di c2-c4, level gugur.
-
-2) TEST1 + TEST2 (engulfing), setelah level terbentuk:
-   - TEST1: candle pertama SETELAH c3 yang wick/body-nya menyentuh ATAU melebihi
-     level. Tidak ada syarat arah candle TEST1 sendiri.
-   - FILTER: candle H1 TEPAT SEBELUM TEST1 harus BERLAWANAN arah dgn setup -- Long: close <
-     open (bearish); Short: close > open (bullish). Doji (close == open) tidak lolos.
-     Kalau gagal, level gugur.
-   - TEST2: candle TEPAT SETELAH TEST1, harus ENGULFING -- Support: ujung body TEST2
-     > high TEST1; Resistance: ujung body TEST2 < low TEST1. Plus body TEST2 harus
-     lebih besar dari body TEST1 DAN lebih besar dari TOTAL wick TEST2 sendiri.
-     Sisi BERLAWANAN tidak boleh melebihi TEST1 (wick maupun body): Long -> low TEST2
-     tidak boleh di bawah low TEST1; Short -> high TEST2 tidak boleh di atas high TEST1.
-     Kalau gagal, level gugur (hanya dicoba sekali).
-
-3) ENTRY -- setelah candle H1 TEST2 closed, MONITORING M5 dengan RSI(RSI_PERIOD=5).
-   Candle M5 pertama yang dinilai = yang open-nya tepat saat H1 TEST2 closed (mis. H1
-   14:00 closed -> M5 15:00, bukan 14:55); tiap candle dinilai saat CLOSED.
-   AREA ENTRY: batas = ujung candle H1 SEBELUM TEST1 (Long -> HIGH-nya, Short -> LOW-nya).
-   Long : hanya BODY candle M5 yang sepenuhnya di BAWAH batas (max(open,close) < batas)
-          yang boleh dipakai. Body di atas batas / menembus batas (di tengah) -> tidak
-          dipakai, tunggu candle berikutnya. Short: kebalikannya (min(open,close) > batas).
-          Ujung body TEPAT di batas = DI LUAR area. Yang dihitung hanya BODY: wick yang
-          keluar area tidak masalah selama body-nya di dalam area.
-   RSI: Long -> RSI < 20; Short -> RSI > 50. Candle yang RSI-nya cocok TAPI body di luar
-   area tidak dipakai; terus menunggu. Begitu body di area DAN RSI cocok -> ENTRY MARKET
-   (di close candle M5 itu, posisi aktif mulai candle M5 berikutnya). Dipantau terus sampai
-   entry atau kadaluarsa EXPIRE_CANDLES (4) candle H1 setelah TEST2. Tiap level 1x.
-   Sinyal searah baru dibuang kalau masih ada sinyal menunggu / posisi aktif searah
-   di koin yang sama.
-
-4) STOP LOSS = PERGERAKAN TERJAUH + SL_BUFFER_PCT (0.25%). Pergerakan terjauh = low
-   terendah (Long) / high tertinggi (Short) yang dicapai sejak candle M5 PERTAMA yang
-   masuk area entry sampai candle entry (inklusif), sebelum RSI valid dan entry. SL =
-   ekstrem tsb digeser 0.25% menjauh (Long: x0.9975, Short: x1.0025). Jarak entry-SL = 1R
-   untuk ukuran posisi (risiko RISK_PCT dari balance).
-   TRAILING STOP: aktif di TRAIL_ACTIVATE_R (3R), SL mengikuti TRAIL_STOP_R (1R) di
-   belakang harga ekstrem (dipantau M5). Kalau di candle M5 yg sama harga menyentuh
-   SL dan trailing aktif/naik sekaligus -> yg dihitung SL (SL dicek duluan).
-
-Deploy ke Railway:
-  Start command -> python backtest_web.py
-  Buka domain Railway -> lihat progress & hasil di browser (auto-refresh)
-
-Periode default: 1 tahun ke belakang dari hari script dijalankan (bisa
-di-override lewat env BACKTEST_START_DATE / BACKTEST_END_DATE).
-
-trades.csv ringkas (waktu WIB, UTC+7), kolom: Koin, Dir, Hasil ('Trail +1.6R'
-atau 'SL'), Level, Terbentuk, Test1, Test2, Entry, Entry time.
+Deploy ke Railway: Start command -> python backtest_web.py ; buka domain Railway untuk lihat progress & hasil.
+Periode default: 1 tahun ke belakang (override: BACKTEST_START_DATE / BACKTEST_END_DATE).
+Env tambahan: EMA_BIAS_FILTER=1/0, BIAS_EMA_FAST=21, BIAS_EMA_SLOW=30, EMA_WARMUP=90, IFVG_LOOKBACK=48.
+trades.csv (WIB): Koin, Dir, Hasil ('TP +x.xR' / 'SL'), Level, Terbentuk, Touch, IFVG, Limit, SL, Fill time, Exit, Exit time.
 """
-
 import os, threading, time, io, csv
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -85,20 +45,16 @@ RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk per
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
-EMA_FAST         = int(os.environ.get('EMA_FAST', 4))
-EMA_SLOW         = int(os.environ.get('EMA_SLOW', 10))
-EXPIRE_CANDLES   = int(os.environ.get('EXPIRE_CANDLES', 4))          # entry kadaluarsa N candle H1 setelah TEST2 closed
-SL_BUFFER_PCT    = float(os.environ.get('SL_BUFFER_PCT', '0.0025'))  # SL = pergerakan terjauh di area entry + 0.25%
-RSI_PERIOD       = int(os.environ.get('RSI_PERIOD', 5))              # RSI M5
-RSI_LONG_MAX     = float(os.environ.get('RSI_LONG_MAX', '20'))       # Long entry kalau RSI < 20
-RSI_SHORT_MIN    = float(os.environ.get('RSI_SHORT_MIN', '50'))      # Short entry kalau RSI > 50
-TRAIL_ACTIVATE_R = float(os.environ.get('TRAIL_ACTIVATE_R', '3.0'))  # trailing aktif begitu profit capai 3R (sama dgn bot)
-TRAIL_STOP_R     = float(os.environ.get('TRAIL_STOP_R', '1.0'))      # setelah aktif, SL mengikuti 1R di belakang harga tertinggi/terendah
+EMA_BIAS_FILTER  = os.environ.get('EMA_BIAS_FILTER', '1').strip() not in ('0', 'false', 'False', '')
+BIAS_EMA_FAST    = int(os.environ.get('BIAS_EMA_FAST', 21))
+BIAS_EMA_SLOW    = int(os.environ.get('BIAS_EMA_SLOW', 30))
+EMA_WARMUP       = int(os.environ.get('EMA_WARMUP', 90))             # level dgn candle FVG ke-k < ini dibuang
+IFVG_LOOKBACK    = int(os.environ.get('IFVG_LOOKBACK', 48))          # FVG tidak searah maks N candle M5 sebelum sentuh
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
 
-MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '10').strip().lower()
+MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '0').strip().lower()
 MAX_CONCURRENT = float('inf') if MAX_CONCURRENT_RAW in ('', '0', 'unlimited', 'inf') else int(MAX_CONCURRENT_RAW)
 
 ALLOW_HEDGE      = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
@@ -181,8 +137,9 @@ _combined_result = {
     'total_r': 0, 'avg_r': 0, 'final_balance': INITIAL_BALANCE,
     'blocked_by_slot': 0, 'blocked_by_margin': 0, 'blocked_by_min_order': 0,
     'blocked_by_invalid_sl': 0, 'blocked_by_dup': 0,
-    'no_test1_count': 0, 'prev_fail_count': 0, 'test2_fail_count': 0, 'dup_signal_count': 0, 'expired_count': 0,
-    'pending_count': 0, 'levels_count': 0, 'filled_count': 0,
+    'levels_count': 0, 'filled_count': 0, 'aktif_count': 0, 'tanpa_fvg_count': 0, 'disentuh_count': 0,
+    'ulang_count': 0, 'warmup_count': 0, 'ema_count': 0, 'no_touch_count': 0, 'no_ifvg_count': 0,
+    'no_fill_count': 0, 'sl_invalid_count': 0,
 }
 
 
@@ -283,231 +240,287 @@ def fetch_bybit_m5(symbol: str) -> pd.DataFrame:
 # DETEKSI LEVEL SUPPORT / RESISTANCE + EMA CROSS (H1) -- sama dgn bot
 # ============================================================
 
+
+# ============================================================
+# DETEKSI STRATEGI (H1: level + FVG + bias EMA | M5: Inverted FVG)
+# ============================================================
+
 N_RIGHT  = 1       # candle kanan (c3) yang wajib bersih (wick tidak boleh menyentuh level)
-N_LEFT   = int(os.environ.get('N_LEFT', 0))   # candle kiri (sebelum c1) yang wajib bersih; 0 = NONAKTIF (hanya kanan)
 WICK_EPS = 1e-9
 H1_MS    = 3600 * 1000
 M5_MS    = 5 * 60 * 1000
+EPS      = 1e-12
 
 
-def find_levels(df):
-    """Deteksi level Support & Resistance dari candle H1 (basis body candle).
-    TANPA syarat wick c1/c2.
-    Syarat kiri : N_LEFT candle SEBELUM c1 tidak boleh melebihi level -- default
-                  N_LEFT=0 = NONAKTIF (Support: low > level; Resistance: high < level).
-    Syarat kanan: N_RIGHT candle setelah c1,c2 (c3) -- wick tidak boleh menyentuh level.
-    Syarat EMA CROSS di RENTANG c2-c4: cukup SALAH SATU dari c2, c3, ATAU c4 yang
-    menjadi penyebab cross EMA_FAST/EMA_SLOW (dari close H1) yang searah --
-    Support -> GOLDEN CROSS, Resistance -> DEATH CROSS.
-    Return list dict: {'type','level','patokan','c1','c2','c_right'}."""
-    o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
-    n = len(df)
-    ema_fast = pd.Series(c).ewm(span=EMA_FAST, adjust=False).mean().values
-    ema_slow = pd.Series(c).ewm(span=EMA_SLOW, adjust=False).mean().values
-
-    def golden_cross_at(j):   # cross TEPAT di index j (dibanding j-1)
-        return ema_fast[j - 1] <= ema_slow[j - 1] and ema_fast[j] > ema_slow[j]
-
-    def death_cross_at(j):
-        return ema_fast[j - 1] >= ema_slow[j - 1] and ema_fast[j] < ema_slow[j]
-
-    levels = []
-    for i in range(N_LEFT, n - 3):   # perlu c0 (i-1) .. c4 (i+3) semua ada di dalam data
-        golden_cross_c2_c4 = any(golden_cross_at(j) for j in (i + 1, i + 2, i + 3))
-        death_cross_c2_c4  = any(death_cross_at(j) for j in (i + 1, i + 2, i + 3))
-        if c[i] < o[i] and c[i + 1] > o[i + 1]:          # bearish lalu bullish -> support
-            S = c[i]
-            right_ok = all(l[i + 2 + k] > S + 1e-9 for k in range(N_RIGHT))
-            left_ok = all(l[i - 1 - k] > S + 1e-9 for k in range(N_LEFT))
-            if right_ok and left_ok and golden_cross_c2_c4:
-                levels.append({'type': 'support', 'level': float(S), 'patokan': float(S),
-                               'c1': i, 'c2': i + 1, 'c_right': [i + 2 + k for k in range(N_RIGHT)]})
-        if c[i] > o[i] and c[i + 1] < o[i + 1]:          # bullish lalu bearish -> resistance
-            R = c[i]
-            right_ok = all(h[i + 2 + k] < R - 1e-9 for k in range(N_RIGHT))
-            left_ok = all(h[i - 1 - k] < R - 1e-9 for k in range(N_LEFT))
-            if right_ok and left_ok and death_cross_c2_c4:
-                levels.append({'type': 'resistance', 'level': float(R), 'patokan': float(R),
-                               'c1': i, 'c2': i + 1, 'c_right': [i + 2 + k for k in range(N_RIGHT)]})
-    return levels
+def raw_levels(o, h, l, c):
+    """Level mentah H1 (basis body): Support = c1 bearish lalu c2 bullish; Resistance = kebalikannya.
+    Level = close c1. c3 (kanan) tidak boleh menyentuh level (wick pun tidak). TANPA EMA cross."""
+    out = []
+    for i in range(0, len(c) - 4):
+        if c[i] < o[i] and c[i + 1] > o[i + 1] and l[i + 2] > c[i] + WICK_EPS:
+            out.append({'ty': 'support', 'd': 'Long', 'L': float(c[i]), 'c1': i})
+        if c[i] > o[i] and c[i + 1] < o[i + 1] and h[i + 2] < c[i] - WICK_EPS:
+            out.append({'ty': 'resistance', 'd': 'Short', 'L': float(c[i]), 'c1': i})
+    return out
 
 
-def _test_candidates(df, stats):
-    """TEST1 + TEST2 (engulfing) utk tiap level. Return list kandidat sinyal
-    (belum disimulasikan fill-nya), urut ready_ts. ready_ts = open ts candle TEST2;
-    sinyal baru bisa diproses setelah candle itu closed (ready_ts + 1 jam)."""
-    o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
-    ts = df['ts'].values
-    n = len(df)
-    cands = []
-
-    for lv in find_levels(df):
-        stats['levels'] += 1
-        level = lv['level']; ty = lv['type']; patokan = lv['patokan']
-        last_right_i = lv['c_right'][-1]
-
-        # TEST1: candle pertama setelah c3 yang menyentuh/melebihi patokan (k < n-1 supaya TEST2 ada)
-        start = last_right_i + 1
-        if start >= n - 1:
-            stats['no_test1'] += 1
+def activate_level(lv, H1, st):
+    """Level jadi AKTIF saat FVG H1 searah selesai (candle ke-3 FVG closed).
+    FVG H1 di antara C1..C5 (3 candle berurutan a,b,k; k <= c1+4): gap saja, arah candle bebas.
+      Long : low(k) > high(a) DAN close(k) > high(b)     Short: high(k) < low(a) DAN close(k) < low(b)
+    Level gugur kalau sejak c4 s/d candle penutup FVG harga sudah menyentuh level."""
+    o, h, l, c, ts = H1['o'], H1['h'], H1['l'], H1['c'], H1['ts']
+    n = len(c); i = lv['c1']; d = lv['d']; L = lv['L']; third = None
+    for a_ in (i, i + 1, i + 2):
+        k = a_ + 2
+        if k > i + 4 or k >= n:
             continue
-        if ty == 'support':
-            seg = l[start:n - 1] <= patokan + WICK_EPS
-        else:
-            seg = h[start:n - 1] >= patokan - WICK_EPS
-        if not seg.any():
-            stats['no_test1'] += 1
-            continue
-        test1_i = start + int(seg.argmax())
-        t2 = test1_i + 1
-
-        # FILTER: candle H1 sebelum TEST1 harus berlawanan arah dgn setup
-        # (Long -> bearish: close < open; Short -> bullish: close > open). Doji gugur.
-        pv = test1_i - 1
-        prev_ok = (c[pv] < o[pv]) if ty == 'support' else (c[pv] > o[pv])
-        if not prev_ok:
-            stats['prev_fail'] += 1
-            continue
-
-        # TEST2: engulfing. Sisi BERLAWANAN tidak boleh melebihi TEST1 (wick/body):
-        # Long -> low TEST2 tidak boleh di bawah low TEST1; Short -> high TEST2 tidak
-        # boleh di atas high TEST1 (sama persis masih lolos).
-        if ty == 'support':
-            engulf_ok = max(o[t2], c[t2]) > h[test1_i] + WICK_EPS
-            opposite_ok = l[t2] >= l[test1_i] - WICK_EPS
-        else:
-            engulf_ok = min(o[t2], c[t2]) < l[test1_i] - WICK_EPS
-            opposite_ok = h[t2] <= h[test1_i] + WICK_EPS
-        body_size_t1 = abs(c[test1_i] - o[test1_i])
-        body_size_t2 = abs(c[t2] - o[t2])
-        wick_total_t2 = (h[t2] - max(o[t2], c[t2])) + (min(o[t2], c[t2]) - l[t2])
-        if not (engulf_ok and opposite_ok
-                and body_size_t2 > body_size_t1 + WICK_EPS
-                and body_size_t2 > wick_total_t2 + WICK_EPS):
-            stats['test2_fail'] += 1
-            continue
-
-        direction = 'Long' if ty == 'support' else 'Short'
-        # batas AREA ENTRY = ujung candle H1 sebelum TEST1 (Long -> high, Short -> low)
-        zone_edge = float(h[test1_i - 1]) if direction == 'Long' else float(l[test1_i - 1])
-        cands.append({
-            'kind': 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE',
-            'type': ty, 'level': level, 'direction': direction, 'zone_edge': zone_edge,
-            'ready_ts': int(ts[t2]), 'test1_ts': int(ts[test1_i]), 'c1_ts': int(ts[lv['c1']]),
-        })
-    cands.sort(key=lambda e: e['ready_ts'])
-    return cands
-
-
-def _rsi_entry(m5, ev):
-    """Monitoring M5 dgn RSI + AREA ENTRY setelah candle H1 TEST2 closed.
-    - Candle M5 pertama yang dinilai = open-nya tepat saat H1 TEST2 closed
-      (ready_ts + 1 jam); dinilai saat candle itu CLOSED (RSI dari close-nya).
-    - AREA ENTRY (batas ev['zone_edge'] = ujung candle H1 sebelum TEST1):
-        Long : body M5 sepenuhnya di bawah batas  -> max(open, close) < batas
-        Short: body M5 sepenuhnya di atas batas   -> min(open, close) > batas
-      Body di luar area, menembus batas, atau ujung body TEPAT di batas -> candle
-      tidak dipakai. Hanya BODY yang dihitung; wick boleh keluar area.
-    - Long: RSI < RSI_LONG_MAX; Short: RSI > RSI_SHORT_MIN. Entry = candle PERTAMA yang
-      body-nya di area DAN RSI cocok -> ENTRY MARKET di close candle itu; posisi aktif
-      mulai candle M5 berikutnya (fill_ts).
-    - SL = pergerakan terjauh + SL_BUFFER_PCT: low terendah (Long) / high tertinggi
-      (Short) dari candle M5 pertama yang masuk area sampai candle entry (inklusif).
-    - Dipantau terus sampai entry atau kadaluarsa: EXPIRE_CANDLES candle H1 setelah
-      TEST2 (candle M5 dgn open >= ready_ts + (EXPIRE_CANDLES + 1) jam tidak dihitung).
-    Return (status, signal_idx, entry_price, end_ts, sl_price):
-      status 'fill' | 'expired' | 'pending'."""
-    TS, O, H, L, C, RSI = m5['TS'], m5['O'], m5['H'], m5['L'], m5['C'], m5['RSI']
-    d = ev['direction']
-    edge = ev['zone_edge']
-    start = ev['ready_ts'] + H1_MS
-    end_ts = ev['ready_ts'] + (EXPIRE_CANDLES + 1) * H1_MS
-    a = int(np.searchsorted(TS, start, side='left'))
-    b = int(np.searchsorted(TS, end_ts, side='left'))
-    if b > a:
+        b_ = a_ + 1
         if d == 'Long':
-            in_zone = np.maximum(O[a:b], C[a:b]) < edge
-            rsi_ok = RSI[a:b] < RSI_LONG_MAX            # NaN -> False
+            ok = l[k] > h[a_] and c[k] > h[b_]
         else:
-            in_zone = np.minimum(O[a:b], C[a:b]) > edge
-            rsi_ok = RSI[a:b] > RSI_SHORT_MIN
-        valid = in_zone & rsi_ok
-        if valid.any():
-            k = int(valid.argmax())                      # entry (relatif terhadap a)
-            first_zone = int(in_zone.argmax())           # candle pertama yang masuk area (<= k)
-            idx = a + k
-            if idx + 1 >= len(TS):
-                return 'pending', None, None, end_ts, None   # tidak ada candle setelah sinyal
-            if d == 'Long':
-                extreme = float(L[a + first_zone: idx + 1].min())
-                sl = extreme * (1 - SL_BUFFER_PCT)
-            else:
-                extreme = float(H[a + first_zone: idx + 1].max())
-                sl = extreme * (1 + SL_BUFFER_PCT)
-            return 'fill', idx, float(C[idx]), end_ts, sl
-    if len(TS) == 0 or int(TS[-1]) + M5_MS < end_ts:
-        return 'pending', None, None, end_ts, None
-    return 'expired', None, None, end_ts, None
+            ok = h[k] < l[a_] and c[k] < l[b_]
+        if ok:
+            third = (a_, k)
+            break
+    if third is None:
+        st['tanpa_fvg'] += 1
+        return None
+    k = third[1]
+    seg = slice(i + 3, k + 1)
+    if (d == 'Long' and (l[seg] <= L + WICK_EPS).any()) or (d == 'Short' and (h[seg] >= L - WICK_EPS).any()):
+        st['sudah_disentuh'] += 1
+        return None
+    x = dict(lv)
+    x.update(fvg=third, act_ts=int(ts[k] + H1_MS))
+    return x
+
+
+def level_repeated(x, H1):
+    """Level (2 candle berlawanan: bearish+bullish utk Long, kebalikannya utk Short) muncul LAGI di antara c3 s/d
+    candle penutup FVG -> level awal tidak valid."""
+    o, c = H1['o'], H1['c']
+    i0 = x['c1']; kk = x['fvg'][1]
+    for j in range(i0 + 2, kk):
+        if x['d'] == 'Long' and c[j] < o[j] and c[j + 1] > o[j + 1]:
+            return True
+        if x['d'] == 'Short' and c[j] > o[j] and c[j + 1] < o[j + 1]:
+            return True
+    return False
+
+
+def _mirror(M, Lv, d, a, e):
+    """Cerminkan M5 ke 'Long' relatif terhadap level (Short dibalik). Slice [a:e]."""
+    sl = slice(a, e)
+    if d == 'Long':
+        return ((M['O'][sl] - Lv) / Lv, (M['H'][sl] - Lv) / Lv, (M['L'][sl] - Lv) / Lv, (M['C'][sl] - Lv) / Lv)
+    return (-(M['O'][sl] - Lv) / Lv, -(M['L'][sl] - Lv) / Lv, -(M['H'][sl] - Lv) / Lv, -(M['C'][sl] - Lv) / Lv)
+
+
+def _price(d, Lv, dev):
+    return Lv * (1 + dev) if d == 'Long' else Lv * (1 - dev)
+
+
+def scan_ifvg(lv, e, M):
+    """Monitoring M5 setelah level aktif sampai indeks e (aktivasi level searah berikutnya / data habis).
+    Long (Short = cermin):
+     1) SENTUH: candle M5 pertama dgn low <= level.
+     2) FVG SEARAH (bullish) x1,x2,x3 pada/ setelah sentuh: candle TENGAH x2 bullish, gap low(x3) > high(x1)
+        -> zona searah [high(x1), low(x3)].
+     3) FVG TIDAK SEARAH (bearish) y1,y2,y3: candle TENGAH y2 bearish, gap high(y3) < low(y1) -> zona [high(y3), low(y1)].
+        Selesai (y3) SEBELUM x1; boleh sebelum/sesudah sentuh (mundur maks IFVG_LOOKBACK candle dari candle sentuh,
+        tidak sebelum level aktif). Bagian overlap belum tersentuh sebelum x1 (high candle di antara <= dasar overlap).
+     4) FVG searah 'mengambil' gap tidak searah = zona saling overlap. IFVG = overlap; ENTRY limit di tepi ATAS
+        overlap = min(atas zona tidak searah, atas zona searah) (Short: tepi bawah). Dipasang saat x3 closed.
+     5) SL = kedalaman terjauh sejak sentuh s/d x3 (low terendah / high tertinggi), tanpa tambahan.
+     6) IFVG baru sebelum limit lama terisi -> limit pindah ke IFVG baru. Tanpa expired.
+    Return (status, info). status: 'fill' | 'no_touch' | 'no_ifvg' | 'no_fill' | 'sl_invalid'."""
+    TS = M['TS']; d, Lv = lv['d'], lv['L']
+    a = int(np.searchsorted(TS, lv['act_ts'], side='left'))
+    if a >= e:
+        return 'no_touch', None
+    o_, h_, l_, c_ = _mirror(M, Lv, d, a, e)
+    m = len(o_)
+    tch = np.flatnonzero(l_ <= EPS)
+    if len(tch) == 0:
+        return 'no_touch', None
+    k = int(tch[0])
+    qs = np.arange(k + 2, m)
+    qs = qs[(c_[qs - 1] > o_[qs - 1]) & (l_[qs] > h_[qs - 2])]          # kandidat FVG searah (x3 = q)
+    bear_ok = np.zeros(m, dtype=bool)
+    if m > 2:
+        bear_ok[2:] = (c_[1:m - 1] < o_[1:m - 1]) & (h_[2:] < l_[:m - 2])   # kandidat FVG tidak searah (y3 = index)
+    bear_idx = np.flatnonzero(bear_ok)
+    lo_lim = max(0, k - IFVG_LOOKBACK)
+    pend = None                                                         # IFVG yang limit-nya sedang menunggu
+
+    def _fill_in(f, last_idx):
+        """Cari candle pertama di (f.q+1 .. last_idx) yang low <= entry. Return rel idx atau None."""
+        s0 = f['q'] + 1
+        if s0 > last_idx:
+            return None
+        hit = l_[s0:last_idx + 1] <= f['ent'] + EPS
+        return s0 + int(hit.argmax()) if hit.any() else None
+
+    def _result(f, r):
+        fp = min(f['ent'], float(o_[r]))
+        if fp <= f['sl']:
+            return 'sl_invalid', None
+        z_lo = max(f['bb'], f['ub'])
+        return 'fill', dict(touch=a + k, fill=a + r, x1=a + f['x1'], x3=a + f['q'], y1=a + f['y1'], y3=a + f['y3'],
+                            n_ifvg=f['n'], entry=_price(d, Lv, fp), sl=_price(d, Lv, f['sl']),
+                            ent_lvl=_price(d, Lv, f['ent']), z_lo=_price(d, Lv, z_lo),
+                            bear=(_price(d, Lv, f['bb']), _price(d, Lv, f['bt'])),
+                            bull=(_price(d, Lv, f['ub']), _price(d, Lv, f['ut'])))
+
+    n_ifvg = 0
+    for q in qs:
+        q = int(q); x1 = q - 2
+        if x1 < k:
+            continue
+        ub, ut = float(h_[x1]), float(l_[q])
+        lo2 = lo_lim + 2
+        if x1 - 1 < lo2:
+            continue
+        sel = bear_idx[(bear_idx >= lo2) & (bear_idx <= x1 - 1)]
+        if len(sel) == 0:
+            continue
+        bb = h_[sel]; bt = l_[sel - 2]
+        ok = (ub < bt) & (ut > bb)
+        if not ok.any():
+            continue
+        seg_h = h_[lo2:x1]
+        rm = np.maximum.accumulate(seg_h[::-1])[::-1]                   # rm[j-lo2] = max h_[j:x1]
+        mx = np.full(len(sel), -np.inf)
+        mm = sel + 1 < x1
+        mx[mm] = rm[sel[mm] + 1 - lo2]
+        ok &= (mx <= np.maximum(bb, ub) + EPS)
+        if not ok.any():
+            continue
+        j = int(np.flatnonzero(ok)[-1])                                 # FVG tidak searah terbaru yg valid
+        y3 = int(sel[j]); y1 = y3 - 2
+        n_ifvg += 1
+        f = dict(q=q, x1=x1, y1=y1, y3=y3, ent=min(float(bt[j]), ut), sl=float(l_[k:q + 1].min()),
+                 bb=float(bb[j]), bt=float(bt[j]), ub=ub, ut=ut, n=n_ifvg)
+        if pend is not None:                                            # limit lama masih hidup sampai candle q (inklusif)
+            r = _fill_in(pend, q)
+            if r is not None:
+                return _result(pend, r)
+        pend = f
+    if pend is None:
+        return 'no_ifvg', None
+    r = _fill_in(pend, m - 1)
+    if r is not None:
+        return _result(pend, r)
+    return 'no_fill', None
+
+
+def opposite_levels(H1, M, d, raw, st0):
+    """Level LAWAN arah utk TARGET exit = level H1 + FVG H1 (valid sama dgn level awal), TANPA filter EMA.
+    Long -> RESISTANCE; Short -> SUPPORT. Aktif saat candle penutup FVG closed.
+    Wick target: Long -> high tertinggi c1/c2 resistance; Short -> low terendah c1/c2 support.
+    return list (act_ts, first_touch_ts, level, wick_target, c1_ts) urut waktu; first_touch_ts = open ts candle M5 pertama
+    (sejak aktif) yang mencapai ujung wick (10**18 kalau belum pernah)."""
+    want = 'Short' if d == 'Long' else 'Long'
+    TS, HH, LL = M['TS'], M['H'], M['L']
+    h, l, ts = H1['h'], H1['l'], H1['ts']
+    out = []
+    for lv in raw:
+        if lv['d'] != want:
+            continue
+        x = activate_level(lv, H1, st0)
+        if x is None or level_repeated(x, H1):
+            continue
+        i = x['c1']
+        T = float(max(h[i], h[i + 1])) if want == 'Short' else float(min(l[i], l[i + 1]))
+        kn = int(np.searchsorted(TS, x['act_ts'], side='left'))
+        if kn >= len(TS):
+            continue
+        hit = (HH[kn:] >= T - EPS) if d == 'Long' else (LL[kn:] <= T + EPS)
+        ft = int(TS[kn + int(hit.argmax())]) if hit.any() else 10 ** 18
+        out.append((int(x['act_ts']), ft, float(x['L']), T, int(ts[i])))
+    out.sort()
+    return out
 
 
 def detect_snr_events(df, m5):
-    """Level -> TEST1/TEST2 -> monitoring M5 (area entry + RSI) -> entry market,
-    SL = pergerakan terjauh di area + SL_BUFFER_PCT.
-    Dedup seperti bot: sinyal searah di koin yang sama dibuang kalau masih ada
-    sinyal menunggu (belum entry/kadaluarsa) saat TEST2-nya closed. Posisi aktif
-    searah ditangani di simulasi (open_trade).
+    """Level H1 (c1/c2 + c3 bersih) + FVG H1 C1..C5 + level tidak diulang sebelum FVG + bias EMA21/EMA30
+    -> monitoring M5 (sentuh -> Inverted FVG) -> LIMIT di IFVG, SL kedalaman terjauh sejak sentuh.
+    Exit: TARGET = ujung wick level lawan (H1 + FVG) terbaru yg belum tercapai (lihat run_combined_backtest).
     Return (events, stats). events urut fill_ts, dict:
-    {'kind','type','level','direction','entry_price','sl_price','fill_ts',
-     'test1_ts','test2_ts','c1_ts'}  (fill_ts = open candle M5 SETELAH candle sinyal)"""
-    stats = {'levels': 0, 'entry': 0, 'no_test1': 0, 'prev_fail': 0, 'test2_fail': 0, 'dup': 0,
-             'expired': 0, 'pending': 0}
+    {'kind','type','level','direction','entry_price','sl_price','fill_ts','test1_ts','test2_ts','c1_ts','targets','meta'}"""
+    stats = {'levels': 0, 'tanpa_fvg': 0, 'sudah_disentuh': 0, 'ulang': 0, 'warmup': 0, 'ema_ditolak': 0, 'aktif': 0,
+             'no_touch': 0, 'no_ifvg': 0, 'no_fill': 0, 'sl_invalid': 0, 'entry': 0}
     events = []
-    cands = _test_candidates(df, stats)
-    if m5 is None:
-        stats['pending'] = len(cands)
+    if m5 is None or df is None or len(df) < 10:
         return events, stats
+    H1 = {k: df[v].values.astype(float) for k, v in (('o', 'open'), ('h', 'high'), ('l', 'low'), ('c', 'close'))}
+    H1['ts'] = df['ts'].values.astype(np.int64)
+    raw = raw_levels(H1['o'], H1['h'], H1['l'], H1['c'])
+    stats['levels'] = len(raw)
+    acts = [x for x in (activate_level(lv, H1, stats) for lv in raw) if x is not None]
+    keep = []
+    for x in acts:
+        if level_repeated(x, H1):
+            stats['ulang'] += 1
+        else:
+            keep.append(x)
+    acts = keep
+    if EMA_BIAS_FILTER:
+        cs = pd.Series(H1['c'])
+        ea = cs.ewm(span=BIAS_EMA_FAST, adjust=False).mean().values
+        eb = cs.ewm(span=BIAS_EMA_SLOW, adjust=False).mean().values
+        keep = []
+        for x in acts:
+            kk = x['fvg'][1]
+            if kk < EMA_WARMUP:
+                stats['warmup'] += 1
+                continue
+            if (x['d'] == 'Long') == bool(ea[kk] > eb[kk]):
+                keep.append(x)
+            else:
+                stats['ema_ditolak'] += 1
+        acts = keep
+    stats['aktif'] = len(acts)
 
-    busy_until = {'Long': 0, 'Short': 0}
-    for ev in cands:
-        d = ev['direction']
-        if ev['ready_ts'] + H1_MS < busy_until[d]:
-            stats['dup'] += 1      # masih ada sinyal searah menunggu -> dibuang
-            continue
-        status, idx, price, end_ts, sl = _rsi_entry(m5, ev)
-        if status == 'expired':
-            stats['expired'] += 1
-            busy_until[d] = end_ts
-            continue
-        if status != 'fill':
-            stats['pending'] += 1
-            busy_until[d] = end_ts
-            continue
-        fill_ts = int(m5['TS'][idx + 1])
-        busy_until[d] = fill_ts
-
-        stats['entry'] += 1
-        events.append({
-            'kind': ev['kind'], 'type': ev['type'], 'level': ev['level'], 'direction': d,
-            'entry_price': price, 'sl_price': sl, 'fill_ts': fill_ts,
-            'test1_ts': ev['test1_ts'], 'test2_ts': ev['ready_ts'], 'c1_ts': ev['c1_ts'],
-        })
-
+    st0 = {'tanpa_fvg': 0, 'sudah_disentuh': 0}
+    OPP = {d: opposite_levels(H1, m5, d, raw, st0) for d in ('Long', 'Short')}
+    TS = m5['TS']
+    for d in ('Long', 'Short'):
+        lst = sorted([x for x in acts if x['d'] == d], key=lambda x: x['act_ts'])
+        for j, lv in enumerate(lst):
+            e = int(np.searchsorted(TS, lst[j + 1]['act_ts'], side='left')) if j + 1 < len(lst) else len(TS)
+            status, inf = scan_ifvg(lv, e, m5)
+            if status != 'fill':
+                stats[status] += 1
+                continue
+            stats['entry'] += 1
+            f = inf['fill']; fv = lv['fvg']
+            events.append({
+                'kind': 'SNR_SUPPORT' if d == 'Long' else 'SNR_RESISTANCE', 'type': lv['ty'], 'level': lv['L'],
+                'direction': d, 'entry_price': inf['entry'], 'sl_price': inf['sl'], 'fill_ts': int(TS[f]),
+                'test1_ts': int(TS[inf['touch']]), 'test2_ts': int(TS[inf['x3']]), 'c1_ts': int(H1['ts'][lv['c1']]),
+                'targets': OPP[d],
+                'meta': {
+                    'fvg_h1': (int(H1['ts'][fv[0]]), int(H1['ts'][fv[1]])), 'level_aktif': int(lv['act_ts']),
+                    'touch_ts': int(TS[inf['touch']]), 'y1_ts': int(TS[inf['y1']]), 'y3_ts': int(TS[inf['y3']]),
+                    'x1_ts': int(TS[inf['x1']]), 'x3_ts': int(TS[inf['x3']]), 'n_ifvg': inf['n_ifvg'],
+                    'bear': inf['bear'], 'bull': inf['bull'], 'ifvg_entry': inf['ent_lvl'], 'ifvg_low': inf['z_lo'],
+                },
+            })
     events.sort(key=lambda e: e['fill_ts'])
     return events, stats
 
 
 def detect_all_events(df, m5):
-    """Support & Resistance + EMA cross + TEST1/TEST2 + RSI M5 -- SNR_SUPPORT (Long) dan
-    SNR_RESISTANCE (Short). Dedup: (kind, level, fill_ts) sama persis = 1 sinyal."""
+    """Dedup: (kind, level, fill_ts) sama persis = 1 sinyal."""
     events, stats = detect_snr_events(df, m5)
-    seen = set()
-    deduped = []
+    seen = set(); deduped = []
     for e in events:
-        dedup_key = (e['kind'], round(e['level'], 10), e['fill_ts'])
-        if dedup_key in seen:
+        key = (e['kind'], round(e['level'], 10), e['fill_ts'])
+        if key in seen:
             continue
-        seen.add(dedup_key)
-        deduped.append(e)
+        seen.add(key); deduped.append(e)
     deduped.sort(key=lambda e: e['fill_ts'])
     return deduped, stats
 
@@ -516,47 +529,16 @@ def detect_all_events(df, m5):
 # STRUKTUR M5 UTK LOOKUP CEPAT
 # ============================================================
 
-def _rsi_wilder(close, period):
-    """RSI Wilder (RMA) -- sama dgn RSI standar TradingView/Bybit. NaN sebelum cukup data."""
-    n = len(close)
-    rsi = np.full(n, np.nan)
-    if n <= period:
-        return rsi
-    diff = np.diff(close)
-    gain = np.where(diff > 0, diff, 0.0)
-    loss = np.where(diff < 0, -diff, 0.0)
-    avg_g = float(gain[:period].mean())
-    avg_l = float(loss[:period].mean())
-
-    def _val(g, l):
-        if l == 0:
-            return 50.0 if g == 0 else 100.0
-        return 100.0 - 100.0 / (1.0 + g / l)
-
-    rsi[period] = _val(avg_g, avg_l)
-    for i in range(period + 1, n):
-        avg_g = (avg_g * (period - 1) + gain[i - 1]) / period
-        avg_l = (avg_l * (period - 1) + loss[i - 1]) / period
-        rsi[i] = _val(avg_g, avg_l)
-    return rsi
-
-
 def prepare_m5(df_m5):
     if df_m5 is None or df_m5.empty:
         return None
     df_m5 = df_m5.sort_values('ts').reset_index(drop=True)
-    close = df_m5['close'].values.astype(float)
     return {
         'TS': df_m5['ts'].values.astype(np.int64),
-        'O': df_m5['open'].values, 'H': df_m5['high'].values,
-        'L': df_m5['low'].values, 'C': df_m5['close'].values,
-        'RSI': _rsi_wilder(close, RSI_PERIOD),
+        'O': df_m5['open'].values.astype(float), 'H': df_m5['high'].values.astype(float),
+        'L': df_m5['low'].values.astype(float), 'C': df_m5['close'].values.astype(float),
     }
 
-
-# ============================================================
-# PERSIAPAN PER-KOIN
-# ============================================================
 
 def prepare_coin(symbol, df, m5):
     df = df.sort_values('ts').reset_index(drop=True)
@@ -574,10 +556,35 @@ def prepare_coin(symbol, df, m5):
 # SIMULASI GABUNGAN (semua koin, 1 balance, 1 pool slot)
 # ============================================================
 #
-# Tiap event dari detect_all_events() SUDAH final: entry market sudah terjadi di fill_ts
-# (entry_price = close candle M5 sinyal RSI di area entry, sl_price = pergerakan terjauh + 0.25%). Simulasi membuka
-# posisi saat waktu (M5) sampai di fill_ts event itu. Kalau slot/margin/min order
-# tidak cukup, atau sudah ada posisi searah di koin yang sama, setup hangus.
+# Tiap event dari detect_all_events() = LIMIT di IFVG yang sudah terfill di fill_ts (entry_price = harga fill,
+# sl_price = kedalaman terjauh sejak sentuh). Posisi dibuka saat waktu (M5) sampai di fill_ts. Slot/margin/min order
+# tidak cukup, atau sudah ada posisi searah di koin yang sama -> setup hangus.
+# EXIT: SL tetap; TARGET dinamis = ujung wick level lawan terbaru (H1+FVG) yang belum tersentuh & lebih jauh dari entry.
+
+def _cand_targets(targets, direction, E, fill_ts):
+    """Saring kandidat target sekali saat entry: wick T & level di sisi profit dari entry, dan belum tersentuh
+    sebelum candle fill. targets = (act_ts, first_touch_ts, level, T, c1_ts)."""
+    out = []
+    for act, ft, lvl, T, c1 in targets:
+        if ft < fill_ts:
+            continue
+        if direction == 'Long':
+            if lvl > E and T > E:
+                out.append((act, ft, T, c1))
+        else:
+            if lvl < E and T < E:
+                out.append((act, ft, T, c1))
+    return out
+
+
+def _current_target(pos, now_ts):
+    """Target aktif di candle now_ts: level lawan yang sudah aktif (act<=now), belum tersentuh (ft>=now); pilih c1 TERBARU."""
+    best = None
+    for act, ft, T, c1 in pos['targets']:
+        if act <= now_ts <= ft and (best is None or c1 > best[1]):
+            best = (T, c1)
+    return None if best is None else best[0]
+
 
 def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
     balance = INITIAL_BALANCE
@@ -629,8 +636,8 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'symbol': symbol, 'direction': direction, 'entry': entry_price, 'sl': sl,
             'dist': dist, 'qty': qty, 'entry_ts': entry_ts, 'level': ev['level'],
             'kind': ev['kind'], 'margin': margin_needed,
-            'c1_ts': ev['c1_ts'], 'test1_ts': ev['test1_ts'], 'test2_ts': ev['test2_ts'],
-            'trail_active': False, 'extreme': entry_price,   # high/low-water mark, mulai dari entry
+            'c1_ts': ev['c1_ts'], 'test1_ts': ev['test1_ts'], 'test2_ts': ev['test2_ts'], 'meta': ev.get('meta', {}),
+            'fill_ts': entry_ts, 'targets': _cand_targets(ev['targets'], direction, entry_price, entry_ts),
         }
         total_margin_used += margin_needed
         positions_by_symbol.setdefault(symbol, set()).add(key)
@@ -654,7 +661,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'level': pos['level'], 'kind': pos['kind'],
             'level_formed_ts': pos['c1_ts'],
             'level_formed_wib': _fmt_wib(pos['c1_ts']),
-            'test1_ts': pos['test1_ts'], 'test2_ts': pos['test2_ts'],
+            'test1_ts': pos['test1_ts'], 'test2_ts': pos['test2_ts'], 'meta': pos['meta'],
             'entry_wib': _fmt_wib(pos['entry_ts']),
             'exit_wib': _fmt_wib(exit_ts),
         })
@@ -665,49 +672,30 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         now_ts = int(m5['TS'][j])
         hi, lo = m5['H'][j], m5['L'][j]
 
-        # 1) exit posisi aktif simbol ini (trailing stop: aktif di TRAIL_ACTIVATE_R,
-        #    SL mengikuti TRAIL_STOP_R di belakang harga ekstrem).
-        #    ATURAN SIMULTAN: kalau di candle M5 yg SAMA harga menyentuh SL
-        #    (level SL SEBELUM candle ini) dan sekaligus trailing akan aktif /
-        #    naik, maka yg dihitung = SL.
+        # 1) exit posisi aktif simbol ini. Urutan per candle: SL dulu (exit = min/max(SL, open) utk gap), lalu TARGET
+        #    (exit = max/min(T, open)). Candle fill (entry_ts == now_ts) tidak dicek TP.
+        op = m5['O'][j]
         keys = positions_by_symbol.get(symbol)
         if keys:
             for key in list(keys):
                 pos = active_positions[key]
-                direction = pos['direction']
-                entry, dist = pos['entry'], pos['dist']
-                reason_stop = 'TRAIL' if pos['trail_active'] else 'SL'
-
-                if direction == 'Long':
-                    if lo <= pos['sl'] + 1e-12:
-                        close_trade(key, pos['sl'], reason_stop, now_ts)
+                S = pos['sl']
+                if pos['direction'] == 'Long':
+                    if lo <= S * (1 + 1e-9):
+                        close_trade(key, min(S, op), 'SL', now_ts)
                         continue
-                    if hi > pos['extreme']:
-                        pos['extreme'] = hi
-                    profit_r = (pos['extreme'] - entry) / dist
-                    if not pos['trail_active'] and profit_r >= TRAIL_ACTIVATE_R:
-                        pos['trail_active'] = True
-                    if pos['trail_active']:
-                        new_sl = pos['extreme'] - TRAIL_STOP_R * dist
-                        if new_sl > pos['sl']:
-                            pos['sl'] = new_sl   # SL cuma boleh naik
-                            if lo <= pos['sl'] + 1e-12:
-                                close_trade(key, pos['sl'], 'TRAIL', now_ts)
+                    if pos['entry_ts'] < now_ts:
+                        T = _current_target(pos, now_ts)
+                        if T is not None and hi >= T:
+                            close_trade(key, max(T, op), 'TP', now_ts)
                 else:  # Short
-                    if hi >= pos['sl'] - 1e-12:
-                        close_trade(key, pos['sl'], reason_stop, now_ts)
+                    if hi >= S * (1 - 1e-9):
+                        close_trade(key, max(S, op), 'SL', now_ts)
                         continue
-                    if lo < pos['extreme']:
-                        pos['extreme'] = lo
-                    profit_r = (entry - pos['extreme']) / dist
-                    if not pos['trail_active'] and profit_r >= TRAIL_ACTIVATE_R:
-                        pos['trail_active'] = True
-                    if pos['trail_active']:
-                        new_sl = pos['extreme'] + TRAIL_STOP_R * dist
-                        if new_sl < pos['sl']:
-                            pos['sl'] = new_sl
-                            if hi >= pos['sl'] - 1e-12:
-                                close_trade(key, pos['sl'], 'TRAIL', now_ts)
+                    if pos['entry_ts'] < now_ts:
+                        T = _current_target(pos, now_ts)
+                        if T is not None and lo <= T:
+                            close_trade(key, min(T, op), 'TP', now_ts)
 
         # 2) entry market simbol ini terjadi di candle ini (open candle = harga entry).
         #    Slot/margin/min order tidak cukup -> setup hangus.
@@ -721,9 +709,9 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
                 nonlocal_blocks[block_reason] += 1
             else:
                 pos = active_positions[opened_key]
-                if (pos['direction'] == 'Long' and lo <= pos['sl'] + 1e-12) or \
-                   (pos['direction'] == 'Short' and hi >= pos['sl'] - 1e-12):
-                    close_trade(opened_key, pos['sl'], 'SL', now_ts)
+                if (pos['direction'] == 'Long' and lo <= pos['sl'] * (1 + 1e-9)) or \
+                   (pos['direction'] == 'Short' and hi >= pos['sl'] * (1 - 1e-9)):
+                    close_trade(opened_key, min(pos['sl'], op) if pos['direction'] == 'Long' else max(pos['sl'], op), 'SL', now_ts)
 
     nonlocal_blocks = {'slot': 0, 'margin': 0, 'min_order': 0, 'invalid_sl': 0, 'dup': 0}
 
@@ -894,12 +882,10 @@ def _run():
     global _phase, _results, _kind_results, _per_coin_results, _all_trades, _combined_result
     global _monthly_results, _avg_monthly_growth
     try:
-        _log_msg(f"🚀 Mulai backtest SNR (S&R + EMA{EMA_FAST}/{EMA_SLOW} cross + TEST1/TEST2 engulfing) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
-        _log_msg(f"   Syarat: level c1-c2 (c3 bersih) + EMA cross searah di c2-c4 -> TEST1 (sentuh level; candle H1 sebelumnya harus berlawanan arah) -> TEST2 engulfing "
-                  f"(body>body TEST1, body>total wick, sisi berlawanan tidak melebihi TEST1) -> monitoring M5 (body di area entry = ujung candle H1 sebelum TEST1) RSI{RSI_PERIOD} "
-                  f"(Long<{RSI_LONG_MAX:g}, Short>{RSI_SHORT_MIN:g}) -> entry market, kadaluarsa {EXPIRE_CANDLES} candle H1  "
-                  f"SL = pergerakan terjauh di area + {SL_BUFFER_PCT*100:.2f}%  "
-                  f"Trailing: aktif di {TRAIL_ACTIVATE_R:.1f}R, jarak {TRAIL_STOP_R:.1f}R dari extreme (SL & trail bersamaan -> SL)")
+        _log_msg(f"🚀 Mulai backtest SNR (level H1 + FVG H1 + bias EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW} + Inverted FVG M5, exit target level lawan) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
+        _log_msg(f"   Level c1/c2 (c3 bersih) + FVG H1 di C1..C5 + level tidak berulang sebelum FVG + bias EMA (filter={'ON' if EMA_BIAS_FILTER else 'OFF'}, warm-up {EMA_WARMUP}) "
+                  f"-> sentuh -> IFVG M5 (lookback {IFVG_LOOKBACK}) -> LIMIT di IFVG, SL = kedalaman terjauh sejak sentuh, tanpa expired. "
+                  f"Exit: TARGET = wick level lawan terbaru yang belum tersentuh (H1+FVG, tanpa EMA); SL dicek duluan.")
 
         coins = {}
         m5_data = {}
@@ -919,9 +905,9 @@ def _run():
                 n_by_kind[ev['kind']] = n_by_kind.get(ev['kind'], 0) + 1
             kind_str = ', '.join(f"{k}:{v}" for k, v in sorted(n_by_kind.items()))
             st = cp['stats']
-            _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['entry']} entry market ({kind_str or '-'}), "
-                      f"{st['no_test1']} tanpa TEST1, {st['prev_fail']} gagal filter candle sebelum TEST1, {st['test2_fail']} gagal TEST2, {st['dup']} dibuang (sinyal searah masih menunggu), "
-                      f"{st['expired']} kadaluarsa tanpa sinyal RSI, {st['pending']} belum selesai (data habis).")
+            _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['aktif']} aktif, {st['entry']} limit terfill ({kind_str or '-'}); "
+                      f"gugur: tanpa FVG {st['tanpa_fvg']}, disentuh sebelum FVG {st['sudah_disentuh']}, level berulang {st['ulang']}, warm-up {st['warmup']}, "
+                      f"EMA {st['ema_ditolak']}; M5: tanpa sentuh {st['no_touch']}, tanpa IFVG {st['no_ifvg']}, limit tak terfill {st['no_fill']}, SL tidak valid {st['sl_invalid']}.")
 
         _log_msg(f"🧮 Menjalankan simulasi gabungan ({len(coins)} koin)...")
         result = run_combined_backtest(coins, m5_data)
@@ -952,12 +938,11 @@ def _run():
                 'blocked_by_dup': result['blocked_by_dup'],
                 'levels_count': sum_st('levels'),
                 'filled_count': sum_st('entry'),
-                'no_test1_count': sum_st('no_test1'),
-                'prev_fail_count': sum_st('prev_fail'),
-                'test2_fail_count': sum_st('test2_fail'),
-                'dup_signal_count': sum_st('dup'),
-                'expired_count': sum_st('expired'),
-                'pending_count': sum_st('pending'),
+                'aktif_count': sum_st('aktif'), 'tanpa_fvg_count': sum_st('tanpa_fvg'),
+                'disentuh_count': sum_st('sudah_disentuh'), 'ulang_count': sum_st('ulang'),
+                'warmup_count': sum_st('warmup'), 'ema_count': sum_st('ema_ditolak'),
+                'no_touch_count': sum_st('no_touch'), 'no_ifvg_count': sum_st('no_ifvg'),
+                'no_fill_count': sum_st('no_fill'), 'sl_invalid_count': sum_st('sl_invalid'),
             })
             _results[:] = per_symbol_breakdown(result['trades'])
             _kind_results[:] = per_kind_breakdown(result['trades'])
@@ -1071,7 +1056,7 @@ def _render_html() -> bytes:
 </style>
 </head>
 <body>
-  <h1>📊 Backtest SNR (S&R + EMA{EMA_FAST}/{EMA_SLOW} cross + TEST1/TEST2 + RSI{RSI_PERIOD} M5)</h1>
+  <h1>📊 Backtest SNR (H1 level + FVG + EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW} bias + IFVG M5, target level lawan)</h1>
   {status_html}
 
   <div class="cards">
@@ -1084,30 +1069,22 @@ def _render_html() -> bytes:
   </div>
 
   <div class="note">
-    💡 <b>Strategi sama dengan bot (S&R + EMA cross + TEST1/TEST2 engulfing)</b>:
-    <br>• <b>Level</b> (H1): c1+c2 berlawanan arah, level = close c1. Candle c3 (kanan) tidak boleh menyentuh/melebihi level (wick pun tidak). Syarat kiri nonaktif.
-    Wajib ada <b>EMA{EMA_FAST}/{EMA_SLOW} cross searah</b> di salah satu c2, c3, atau c4 (Support → golden cross, Resistance → death cross).
-    <br>• <b>TEST1</b>: candle pertama setelah c3 yang wick/body-nya menyentuh/melebihi level.
-    Candle H1 <b>tepat sebelum TEST1</b> harus berlawanan arah (Long: close &lt; open; Short: close &gt; open), kalau tidak level gugur.
-    <b>TEST2</b>: candle tepat sesudahnya harus <b>engulfing</b> (Support: ujung body &gt; high TEST1; Resistance: ujung body &lt; low TEST1),
-    body TEST2 &gt; body TEST1, body TEST2 &gt; total wick TEST2, dan sisi berlawanan tidak boleh melebihi TEST1
-    (Long: low TEST2 tidak di bawah low TEST1; Short: high TEST2 tidak di atas high TEST1). Gagal → level gugur.
-    <br>• <b>ENTRY</b>: setelah candle H1 TEST2 closed, monitoring <b>M5</b> dimulai dari candle M5 yang open-nya tepat saat H1 closed
-    (dinilai saat M5 closed). <b>Area entry</b>: batas = ujung candle H1 sebelum TEST1 (Long → high, Short → low).
-    Long: <b>body</b> M5 harus sepenuhnya di bawah batas; Short: sepenuhnya di atas batas. Body di luar area, menembus batas, atau ujung body tepat di batas → tidak dipakai (hanya body yang dihitung, wick boleh keluar area).
-    <b>RSI{RSI_PERIOD}</b> M5: Long → RSI &lt; {RSI_LONG_MAX:g}, Short → RSI &gt; {RSI_SHORT_MIN:g}.
-    Begitu body di area <b>dan</b> RSI cocok → <b>entry market</b> (di close candle itu). Dipantau terus sampai entry atau kadaluarsa
-    <b>{EXPIRE_CANDLES} candle H1</b> setelah TEST2. Tiap level dipakai 1x; sinyal searah dibuang kalau masih ada
-    sinyal menunggu / posisi aktif searah di koin yang sama.
-    <br>• <b>SL</b> = pergerakan terjauh di area entry (low terendah Long / high tertinggi Short sejak candle pertama masuk area
-    sampai candle entry) + <b>{SL_BUFFER_PCT*100:.2f}%</b> (= 1R untuk ukuran posisi).
-    <b>Trailing stop</b>: aktif di <b>{TRAIL_ACTIVATE_R:.1f}R</b>, SL mengikuti <b>{TRAIL_STOP_R:.1f}R</b> di belakang harga ekstrem (dipantau M5).
-    Kalau SL dan trailing tersentuh di candle M5 yang sama, yang dihitung <b>SL</b>.
+    💡 <b>Strategi (level H1 + FVG H1 + Inverted FVG M5)</b>:
+    <br>• <b>Level</b> (H1): c1+c2 berlawanan arah, level = close c1; c3 tidak boleh menyentuh level. Wajib ada <b>FVG H1 searah</b> di C1..C5
+    (3 candle berurutan, gap saja; candle ke-3 close melewati wick candle ke-2). Level aktif saat FVG selesai. Gugur kalau harga sudah menyentuh level
+    antara c4 s/d candle penutup FVG, atau kalau pasangan level searah muncul lagi sebelum FVG selesai.
+    <br>• <b>Bias EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW}</b> (level awal saja): Long hanya kalau EMA{BIAS_EMA_FAST} &gt; EMA{BIAS_EMA_SLOW}, Short kalau &lt;
+    (filter {'ON' if EMA_BIAS_FILTER else 'OFF'}, warm-up {EMA_WARMUP} candle). Level searah baru menggantikan yang lama; tanpa expired.
+    <br>• <b>Konfirmasi M5 (IFVG)</b>: setelah level disentuh, FVG M5 searah harus 'mengambil' gap FVG M5 tidak searah (boleh terbentuk sampai {IFVG_LOOKBACK} candle
+    sebelum sentuh). Entry <b>limit</b> di tepi atas overlap (Short: bawah); IFVG baru sebelum fill memindahkan limit.
+    <b>SL</b> = kedalaman terjauh sejak sentuh s/d FVG searah selesai (tanpa buffer).
+    <br>• <b>Exit</b>: tanpa trailing. <b>TARGET</b> = ujung wick level lawan (H1+FVG, tanpa EMA) terbaru yang belum tersentuh dan lebih jauh dari entry;
+    berubah dinamis. SL dicek duluan dalam candle yang sama; TP tidak dicek di candle fill.
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
-    Level terdeteksi: {cr.get('levels_count',0)}. Entry market: {cr.get('filled_count',0)}.
-    Gugur — tanpa TEST1: {cr.get('no_test1_count',0)}, gagal filter candle sebelum TEST1: {cr.get('prev_fail_count',0)}, gagal TEST2: {cr.get('test2_fail_count',0)},
-    sinyal searah masih menunggu: {cr.get('dup_signal_count',0)}, kadaluarsa tanpa sinyal RSI: {cr.get('expired_count',0)},
-    belum selesai (data habis): {cr.get('pending_count',0)}.
+    Level terdeteksi: {cr.get('levels_count',0)}. Aktif (lolos FVG/filter): {cr.get('aktif_count',0)}. Limit terfill: {cr.get('filled_count',0)}.
+    Gugur — tanpa FVG: {cr.get('tanpa_fvg_count',0)}, disentuh sebelum FVG: {cr.get('disentuh_count',0)}, level berulang: {cr.get('ulang_count',0)},
+    warm-up: {cr.get('warmup_count',0)}, filter EMA: {cr.get('ema_count',0)}; M5 — tanpa sentuh: {cr.get('no_touch_count',0)},
+    tanpa IFVG: {cr.get('no_ifvg_count',0)}, limit tak terfill: {cr.get('no_fill_count',0)}, SL tidak valid: {cr.get('sl_invalid_count',0)}.
     Sinyal terblokir saat entry — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
     min order: {cr.get('blocked_by_min_order',0)}, posisi searah masih aktif: {cr.get('blocked_by_dup',0)}.
     <br>Unduh semua trade: <a href="/trades.csv">/trades.csv</a> &nbsp;|&nbsp;
@@ -1160,30 +1137,31 @@ def _fmt_price(x):
 
 
 def _hasil_str(t):
-    """Trailing -> 'Trail +1.6R' (R bersih setelah fee); SL -> cukup 'SL'."""
-    if t['reason'] == 'TRAIL':
-        return f"Trail {t['r_mult']:+.1f}R"
-    return 'SL'
+    """TP -> 'TP +1.6R' (R bersih setelah fee); SL -> 'SL' (+ R bersih kalau bukan -1R persis, mis. gap)."""
+    if t['reason'] == 'TP':
+        return f"TP {t['r_mult']:+.1f}R"
+    return f"SL {t['r_mult']:+.1f}R"
 
 
-CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Test1', 'Test2', 'Entry', 'Entry time']
+CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Touch', 'IFVG selesai', 'Limit IFVG', 'Fill', 'SL',
+               'Fill time', 'Exit', 'Exit time']
 
 
 def _trades_csv() -> bytes:
-    """trades.csv ringkas, waktu dalam WIB (UTC+7). Test1 / Test2 = waktu OPEN candle
-    H1 TEST1 / TEST2; Entry = harga market (close candle M5 sinyal RSI);
-    Entry time = waktu OPEN candle M5 saat posisi aktif (candle setelah sinyal)."""
+    """trades.csv ringkas, waktu WIB (UTC+7). Terbentuk = open candle H1 c1; Touch = candle M5 pertama menyentuh level;
+    IFVG selesai = candle M5 x3 (FVG searah selesai); Limit IFVG = harga limit; Fill = harga fill; Exit = harga exit."""
     with _lock:
         trades_cp = list(_all_trades)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(CSV_COLUMNS)
     for t in trades_cp:
+        mt = t.get('meta') or {}
         writer.writerow([
             t['symbol'], t['direction'].upper(), _hasil_str(t), _fmt_price(t['level']),
-            _fmt_wib_short(t['level_formed_ts']), _fmt_wib_short(t['test1_ts']),
-            _fmt_wib_short(t['test2_ts']), _fmt_price(t['entry']),
-            _fmt_wib_short(t['entry_ts']),
+            _fmt_wib_short(t['level_formed_ts']), _fmt_wib_short(t['test1_ts']), _fmt_wib_short(t['test2_ts']),
+            _fmt_price(mt.get('ifvg_entry', t['entry'])), _fmt_price(t['entry']), _fmt_price(t['sl']),
+            _fmt_wib_short(t['entry_ts']), _fmt_price(t['exit']), _fmt_wib_short(t['exit_ts']),
         ])
     return buf.getvalue().encode('utf-8')
 
