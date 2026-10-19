@@ -1,6 +1,6 @@
 """
-backtest_web.py — Backtest S&R H1 + FVG H1 + bias EMA21/30 + konfirmasi Inverted FVG (M5), exit TARGET level lawan
-===================================================================================================================
+backtest_web.py — Backtest S&R H1 + FVG H1 + bias EMA21/30 + konfirmasi S&R M5 berFVG -> IFVG, exit TP = pergerakan terjauh
+=============================================================================================================
 RINGKASAN STRATEGI (Long; Short = cermin)
 1) LEVEL H1 (basis body): c1 bearish, c2 bullish, level = close[c1]; c3 tidak boleh menyentuh level (low[c3] > level).
    Tanpa EMA cross, tanpa TEST1/TEST2, tanpa RSI.
@@ -9,23 +9,64 @@ RINGKASAN STRATEGI (Long; Short = cermin)
 3) Filter level-berulang: kalau di antara c3 s/d candle penutup FVG muncul lagi pasangan 2-candle searah (bearish->bullish
    utk Long) -> level awal tidak valid.
 4) Filter bias EMA21 vs EMA30 (H1, hanya level awal; target exit TIDAK difilter): Long valid kalau EMA21 > EMA30, Short kalau
-   EMA21 < EMA30. Level dgn candle FVG ke-k < EMA_WARMUP (90) dibuang (EMA belum stabil di awal data).
-5) Level searah baru menggantikan level lama (tanpa expired).
-6) KONFIRMASI M5 (Inverted FVG): setelah level aktif -> tunggu SENTUH (low M5 <= level) -> FVG M5 searah (x1,x2,x3; x2
-   bullish; low[x3] > high[x1]) yang 'mengambil' gap FVG M5 tidak searah (y1,y2,y3; y2 bearish; high[y3] < low[y1]) yg
-   selesai sebelum x1 (mundur maks IFVG_LOOKBACK=48 candle dari candle sentuh; bagian overlap belum tersentuh). IFVG =
-   overlap; ENTRY LIMIT di tepi atas overlap. SL = low terdalam sejak candle sentuh s/d x3 (tanpa buffer). IFVG baru
-   sebelum fill -> limit dipindah. Fill = candle M5 pertama dgn low <= limit, harga fill = min(limit, open).
-7) EXIT: tanpa trailing. TARGET = ujung wick level LAWAN terbaru (H1 + FVG H1, tanpa EMA) yang belum tersentuh dan
-   berada di atas entry (Long: resistance, wick = high tertinggi c1/c2; Short: support, wick = low terendah). Target
-   berubah dinamis saat level lawan baru terbentuk / target lama tersentuh. SL dicek duluan dalam candle yang sama;
-   TP tidak dicek di candle fill. Posisi yg belum selesai di akhir data tidak dihitung.
+   EMA21 < EMA30. BIAS_AT=touch (default): bias dihitung SAAT LEVEL TERSENTUH (candle H1 terakhir yg closed sebelum sentuh), bukan saat level
+   terbentuk. Jadi EMA cross di antara level terbentuk s/d tersentuh ikut menentukan: support yg terbentuk saat EMA21 < EMA30 tetap valid
+   kalau kemudian EMA21 cross di atas EMA30 dan harga kembali menyentuh level; sebaliknya level yg bias-nya benar saat terbentuk gugur kalau
+   bias berbalik sebelum sentuh. BIAS_AT=act = dihitung saat level aktif (candle FVG selesai; versi lama). Warm-up EMA_WARMUP (90) candle.
+4b) Filter sentuh EMA21 (LEVEL_EMA_TOUCH=off default | both | any): candle c1 DAN c2 dari level H1 harus menyentuh EMA21 (BIAS_EMA_FAST) candle itu
+   (low <= EMA <= high). 'any' = cukup salah satu. Level dgn c1 < EMA_WARMUP dibuang. Hanya level awal; target exit TIDAK difilter.
+4d) VALIDASI SWING (SWING_VALID=1 default): setelah level terbentuk, dari c1 mundur (c1, c1-1, c1-2, ...) cari SWING kuat terdekat: Long -> high
+   (wick) tertinggi, Short -> low terendah, yg tidak dilampaui candle mana pun dlm SWING_N=5 candle H1 kiri DAN 5 kanan (pivot harus sudah
+   terkonfirmasi sebelum level tersentuh). Level VALID hanya kalau swing itu di-BREAK BODY (close H1 melewatinya) SEBELUM level tersentuh.
+   Tidak di-break = tidak valid; hanya SWEEP wick (high/low menembus tapi close tidak) = tidak valid. SWING_SWEEP_FAIL=1 (default): kalau candle
+   PERTAMA yg menembus swing cuma sweep -> gagal walau kemudian ada break body. Target exit TIDAK difilter.
+4f) SLOPE EMA30 SEARAH SAAT SENTUH (SLOPE_FILTER=1 default, SLOPE_LB=10): saat level tersentuh, slope EMA30 H1 harus searah: Long -> EMA30 naik, Short -> turun.
+   slope = EMA30[i] - EMA30[i-SLOPE_LB], i = candle H1 terakhir yg sudah closed sebelum candle sentuh (tanpa lookahead). Berbeda dgn bias EMA21/30 yg
+   dicek saat level aktif. Hanya level awal; target exit TIDAK difilter.
+4e) INDUCEMENT (IDM_FILTER=1 default, IDM_TYPE=same|opposite|any): level H1 harus punya IDM = level TANPA FVG (pola level c1+c2, c3 bersih) di antara c2 level
+   s/d CANDLE TERTINGGI (Short: terendah) = puncak pergerakan setelah c2 sebelum harga menyentuh level lagi. Urutan Long: support berFVG -> IDM ->
+   candle tertinggi -> sentuh level. IDM boleh terbentuk sebelum ATAU sesudah swing masa lalu di-break (validasi swing 4d terpisah).
+4c) Filter TITIK LEVEL vs EMA30 (LEVEL_VS_EMA=off default | c1 | act): Long valid kalau harga level > EMA30, Short kalau level < EMA30.
+   c1 = EMA30 di candle c1 (saat level terbentuk); act = EMA30 di candle FVG selesai. Level dgn c1 < EMA_WARMUP dibuang. Target exit TIDAK difilter.
+5) LEVEL_MODE=keep (default): SEMUA level disimpan; level yg belum tersentuh tetap aktif walau level searah baru terbentuk, dan bisa
+   dipakai kapan pun nanti tersentuh (tanpa expired; tiap level maks 1 trade). LEVEL_MODE=replace: level searah baru menggantikan yg lama.
+6) KONFIRMASI M5, ENTRY_MODE=ifvg (default) | m5res | m5sr. m5res (Long, Short = cermin): Setelah level H1 TERSENTUH (low M5 <= level):
+   a) RESISTEN M5 berFVG (c1 bullish, c2 bearish, R = close c1, c3 bersih, FVG bearish C1..C4). Dicari mundur maks M5SR_LOOKBACK=48
+      candle M5 sebelum candle sentuh (tidak sebelum level H1 aktif) dan seterusnya; yg belum ada ditunggu.
+   b) tunggu R di-BREAK BODY: candle M5 pertama setelah FVG selesai DAN setelah/saat sentuh yg CLOSE > R (break sebelum sentuh tidak dihitung).
+   c) ENTRY LIMIT di level R (retest): fill = candle M5 pertama setelah candle break dgn low <= R, harga fill = min(R, open).
+      Resisten baru yg di-break sebelum fill -> limit dipindah ke R baru.
+   d) SL = low terendah sejak candle sentuh s/d candle break, DIKURANGI SL_BUFFER_PCT (0.2%).
+   ENTRY_MODE=m5sr (versi sebelumnya):
+   a) RESISTEN M5 berFVG: c1 bullish, c2 bearish, level R = close c1, c3 tidak menyentuh R; FVG bearish di C1..C4 (aturan sama
+      dgn level H1). Mulai dari candle sentuh (M5SR_LOOKBACK=0). Level gugur kalau harga menyentuh R sebelum FVG selesai.
+   b) SUPPORT M5 berFVG terbentuk SETELAH resisten aktif (c1 support > candle FVG resisten): c1 bearish, c2 bullish, c3 bersih,
+      FVG bullish di C1..C4.
+   c) FVG support itu MEM-BREAK R: close candle ke-3 FVG support > R.
+   d) Dari pergerakan itu terbentuk IFVG = overlap FVG bullish support dgn FVG bearish resisten (bagian overlap belum tersentuh
+      sebelum FVG support mulai). ENTRY LIMIT di tepi atas overlap. IFVG baru sebelum fill -> limit dipindah.
+   e) SL = low terdalam sejak candle sentuh s/d FVG support selesai, DIKURANGI buffer SL_BUFFER_PCT (0.2%).
+   ENTRY_MODE=ifvg (default): FVG M5 searah 'mengambil' FVG M5 tidak searah (IFVG_LOOKBACK=48), SL tanpa buffer. ENTRY: IFVG_ENTRY=ifvg (default) = limit di
+   tepi atas overlap IFVG. Opsi lain, IFVG_ENTRY=level:
+   saat IFVG terbentuk (x3 closed), kalau IFVG ada DI ATAS level H1 (tepi atas overlap > level) -> LIMIT di level H1; kalau IFVG ada di
+   BAWAH level (tepi atas <= level) -> MARKET order di open candle M5 berikutnya. IFVG_ENTRY=ifvg = limit di tepi atas overlap (versi lama); IFVG_ENTRY=market = selalu market di open candle setelah x3; mix = di atas level limit IFVG, di bawah level market.
+7) EXIT. TP_MODE=rr: TP TETAP = entry +/- TP_RR (2.0) x |entry - SL| (RR 1:2). TP_MODE=far + MIN_RR=2: TP gerak terjauh tapi setup dgn jarak TP < 2 x jarak SL
+   digugurkan (MIN_RR_MODE=drop, default) ATAU MIN_RR_MODE=extend: TP gerak terjauh tapi minimal 1:2 -> kalau jaraknya < 2 x jarak SL, TP DIPERBESAR
+   sampai tepat 1:2 (TP = max(gerak terjauh, entry +/- 2 x |entry-SL|); TP terjauh yg tak valid/di sisi rugi juga diperbesar). (Opsi lama: TP_MODE=opp = TARGET LEVEL LAWAN: ujung wick level lawan H1+FVG yg belum tersentuh, dinamis, tanpa EMA;
+   TARGET_PICK=farthest (default) -> TERJAUH di sisi profit dari entry, nearest -> terdekat, newest -> c1 terbaru; wick yg sudah tersentuh =
+   terpakai, dilewati. TP_MODE=far = pergerakan terjauh H1 (lihat bawah).
+   TP_MODE=far: tanpa trailing. TP = PERGERAKAN TERJAUH (basis H1) setelah level terbentuk sampai harga kembali menyentuh level
+   (Long: high tertinggi candle H1 dari c2 s/d SEBELUM candle H1 yang menyentuh level; Short: low terendah). Contoh Long: level 0.18,
+   naik sampai 0.21, balik ke 0.18 -> TP 0.21. TP tetap (statis) sejak entry. Kalau TP tidak berada di sisi profit dari
+   harga fill -> setup dibuang (tp_invalid). SL dicek duluan dalam candle yang sama; TP tidak dicek di candle fill.
+   Posisi yg belum selesai di akhir data tidak dihitung.
 Fee: masuk FEE_ENTRY_PCT (limit), keluar FEE_EXIT_PCT. Risk RISK_PCT dari balance (compound), 1 posisi per arah per koin.
 
 Deploy ke Railway: Start command -> python backtest_web.py ; buka domain Railway untuk lihat progress & hasil.
 Periode default: 1 tahun ke belakang (override: BACKTEST_START_DATE / BACKTEST_END_DATE).
-Env tambahan: FVG_LAST_C=4, EMA_BIAS_FILTER=1/0, BIAS_EMA_FAST=21, BIAS_EMA_SLOW=30, EMA_WARMUP=90, IFVG_LOOKBACK=48.
-trades.csv (WIB): Koin, Dir, Hasil ('TP +x.xR' / 'SL'), Level, Terbentuk, Touch, IFVG, Limit, SL, Fill time, Exit, Exit time.
+Env tambahan: FVG_LAST_C=4, EMA_BIAS_FILTER=1/0, BIAS_AT=touch|act, BIAS_EMA_FAST=21, BIAS_EMA_SLOW=30, EMA_WARMUP=90, IFVG_LOOKBACK=48,
+ENTRY_MODE=m5sr|ifvg, M5SR_LOOKBACK=0, SL_BUFFER_PCT=0.002.
+trades.csv (WIB): Koin, Dir, Hasil ('TP +x.xR' / 'SL'), Level, Terbentuk, Touch, Setup selesai, Limit, Fill, SL, TP, Fill time, Exit, Exit time.
 """
 import os, threading, time, io, csv
 from datetime import datetime, timezone, timedelta
@@ -46,11 +87,32 @@ FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 EMA_BIAS_FILTER  = os.environ.get('EMA_BIAS_FILTER', '1').strip() not in ('0', 'false', 'False', '')
+BIAS_AT          = os.environ.get('BIAS_AT', 'touch').strip().lower()   # bias EMA21/30 dihitung: 'touch' = saat level TERSENTUH (cross sejak level terbentuk ikut dihitung) | 'act' = saat level aktif (lama)
 BIAS_EMA_FAST    = int(os.environ.get('BIAS_EMA_FAST', 21))
 BIAS_EMA_SLOW    = int(os.environ.get('BIAS_EMA_SLOW', 30))
 EMA_WARMUP       = int(os.environ.get('EMA_WARMUP', 90))             # level dgn candle FVG ke-k < ini dibuang
 FVG_LAST_C       = int(os.environ.get('FVG_LAST_C', 4))              # FVG H1 dicari di C1..C{FVG_LAST_C}
 IFVG_LOOKBACK    = int(os.environ.get('IFVG_LOOKBACK', 48))          # FVG tidak searah maks N candle M5 sebelum sentuh
+IFVG_ENTRY       = os.environ.get('IFVG_ENTRY', 'ifvg').strip().lower()   # mode ifvg: 'level' = IFVG di atas level -> LIMIT di level H1, IFVG di bawah level -> MARKET | 'mix' = di atas level tetap limit di tepi IFVG, di bawah level MARKET | 'market' = SELALU market di open candle M5 setelah IFVG selesai | 'ifvg' = limit di tepi IFVG (lama)
+ENTRY_MODE       = os.environ.get('ENTRY_MODE', 'ifvg').strip().lower()  # 'm5res' (resisten M5 berFVG di-break body, entry di level) | 'm5sr' (S&R M5 -> IFVG) | 'ifvg' (IFVG biasa)
+M5SR_LOOKBACK    = int(os.environ.get('M5SR_LOOKBACK', 48))          # mode m5res/m5sr: level M5 boleh mulai maks N candle M5 SEBELUM sentuh (0 = hanya mulai dari candle sentuh)
+SLOPE_FILTER     = os.environ.get('SLOPE_FILTER', '1').strip() not in ('0', 'false', 'False', 'off', '')   # slope EMA30 harus searah saat level tersentuh
+SLOPE_LB         = int(os.environ.get('SLOPE_LB', 10))                # slope = EMA30 candle H1 terakhir yg closed sebelum sentuh - EMA30 N candle sebelumnya
+IDM_FILTER       = os.environ.get('IDM_FILTER', '0').strip() not in ('0', 'false', 'False', 'off', '')   # level H1 harus punya inducement (IDM)
+IDM_TYPE         = os.environ.get('IDM_TYPE', 'same').strip().lower()   # 'same' = IDM searah level (Long: support kecil) | 'opposite' | 'any'
+SWING_VALID      = os.environ.get('SWING_VALID', '1').strip() not in ('0', 'false', 'False', 'off', '')   # validasi level via swing high/low yg di-break
+SWING_N          = int(os.environ.get('SWING_N', 5))                  # swing kuat: tak ada yg lebih tinggi/rendah dlm N candle H1 kiri & kanan
+SWING_SWEEP_FAIL = os.environ.get('SWING_SWEEP_FAIL', '1').strip() not in ('0', 'false', 'False', 'off', '')   # candle pertama yg menembus swing hanya sweep -> gagal walau nanti ada break
+SWING_MAX_BACK   = int(os.environ.get('SWING_MAX_BACK', 300))         # cari swing mundur maks N candle H1 dari c1
+LEVEL_VS_EMA     = os.environ.get('LEVEL_VS_EMA', 'off').strip().lower()  # titik level vs EMA30: 'c1' = EMA di candle c1 | 'act' = EMA di candle FVG selesai | 'off'
+LEVEL_EMA_TOUCH  = os.environ.get('LEVEL_EMA_TOUCH', 'off').strip().lower()  # filter level: 'both' = c1 DAN c2 harus menyentuh EMA21 | 'any' = salah satu | 'off'
+LEVEL_MODE       = os.environ.get('LEVEL_MODE', 'keep').strip().lower()  # 'keep' = semua level disimpan, aktif sampai tersentuh | 'replace' = level searah baru menggantikan yg lama
+TARGET_PICK      = os.environ.get('TARGET_PICK', 'farthest').strip().lower()  # TP_MODE=opp: 'farthest' = level lawan terjauh yg belum tersentuh | 'nearest' = terdekat | 'newest' = c1 terbaru
+TP_RR            = float(os.environ.get('TP_RR', 2.0))              # TP_MODE=rr: TP tetap = entry +/- TP_RR x |entry-SL| (2.0 = RR 1:2)
+MIN_RR           = float(os.environ.get('MIN_RR', 0))               # TP_MODE=far: setup digugurkan kalau jarak TP < MIN_RR x |entry-SL| (0 = nonaktif; 2.0 = RR minimal 1:2)
+MIN_RR_MODE      = os.environ.get('MIN_RR_MODE', 'drop').strip().lower()   # MIN_RR>0: 'drop' = gugurkan setup RR kurang | 'extend' = perbesar TP sampai RR = MIN_RR
+TP_MODE          = os.environ.get('TP_MODE', 'far').strip().lower()  # 'far' = pergerakan terjauh (H1) | 'rr' = TP tetap RR 1:TP_RR | 'opp' = level lawan (dinamis, H1+FVG)
+SL_BUFFER_PCT    = float(os.environ.get('SL_BUFFER_PCT', '0.002'))   # mode m5res/m5sr: SL = pergerakan terjauh + buffer 0.2%
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
@@ -139,8 +201,8 @@ _combined_result = {
     'blocked_by_slot': 0, 'blocked_by_margin': 0, 'blocked_by_min_order': 0,
     'blocked_by_invalid_sl': 0, 'blocked_by_dup': 0,
     'levels_count': 0, 'filled_count': 0, 'aktif_count': 0, 'tanpa_fvg_count': 0, 'disentuh_count': 0,
-    'ulang_count': 0, 'warmup_count': 0, 'ema_count': 0, 'no_touch_count': 0, 'no_ifvg_count': 0,
-    'no_fill_count': 0, 'sl_invalid_count': 0,
+    'ulang_count': 0, 'warmup_count': 0, 'ema_count': 0, 'bias_touch_count': 0, 'bias_pulih_count': 0, 'ema_touch_count': 0, 'ema_level_count': 0, 'swing_invalid_count': 0, 'idm_none_count': 0, 'slope_count': 0, 'swing_not_broken_count': 0, 'swing_sweep_count': 0, 'swing_no_pivot_count': 0, 'no_touch_count': 0, 'no_ifvg_count': 0,
+    'no_fill_count': 0, 'sl_invalid_count': 0, 'tp_invalid_count': 0, 'rr_kurang_count': 0, 'rr_diperbesar_count': 0,
 }
 
 
@@ -243,7 +305,7 @@ def fetch_bybit_m5(symbol: str) -> pd.DataFrame:
 
 
 # ============================================================
-# DETEKSI STRATEGI (H1: level + FVG + bias EMA | M5: Inverted FVG)
+# DETEKSI STRATEGI (H1: level + FVG + bias EMA | M5: resisten berFVG di-break / S&R berFVG -> Inverted FVG)
 # ============================================================
 
 N_RIGHT  = 1       # candle kanan (c3) yang wajib bersih (wick tidak boleh menyentuh level)
@@ -331,8 +393,9 @@ def scan_ifvg(lv, e, M):
      3) FVG TIDAK SEARAH (bearish) y1,y2,y3: candle TENGAH y2 bearish, gap high(y3) < low(y1) -> zona [high(y3), low(y1)].
         Selesai (y3) SEBELUM x1; boleh sebelum/sesudah sentuh (mundur maks IFVG_LOOKBACK candle dari candle sentuh,
         tidak sebelum level aktif). Bagian overlap belum tersentuh sebelum x1 (high candle di antara <= dasar overlap).
-     4) FVG searah 'mengambil' gap tidak searah = zona saling overlap. IFVG = overlap; ENTRY limit di tepi ATAS
-        overlap = min(atas zona tidak searah, atas zona searah) (Short: tepi bawah). Dipasang saat x3 closed.
+     4) FVG searah 'mengambil' gap tidak searah = zona saling overlap. IFVG = overlap; tepi ATAS overlap = min(atas zona tidak searah,
+        atas zona searah) (Short: tepi bawah). IFVG_ENTRY=ifvg: ENTRY limit di tepi itu. IFVG_ENTRY=level (default): IFVG di atas level
+        (tepi atas > level) -> LIMIT di level H1; IFVG di bawah level -> MARKET di open candle M5 setelah x3. Dipasang saat x3 closed.
      5) SL = kedalaman terjauh sejak sentuh s/d x3 (low terendah / high tertinggi), tanpa tambahan.
      6) IFVG baru sebelum limit lama terisi -> limit pindah ke IFVG baru. Tanpa expired.
     Return (status, info). status: 'fill' | 'no_touch' | 'no_ifvg' | 'no_fill' | 'sl_invalid'."""
@@ -360,15 +423,18 @@ def scan_ifvg(lv, e, M):
         s0 = f['q'] + 1
         if s0 > last_idx:
             return None
+        if f.get('mkt'):
+            return s0                                                   # market: langsung di open candle setelah x3
         hit = l_[s0:last_idx + 1] <= f['ent'] + EPS
         return s0 + int(hit.argmax()) if hit.any() else None
 
     def _result(f, r):
-        fp = min(f['ent'], float(o_[r]))
+        fp = float(o_[r]) if f.get('mkt') else min(f['ent'], float(o_[r]))
         if fp <= f['sl']:
             return 'sl_invalid', None
         z_lo = max(f['bb'], f['ub'])
         return 'fill', dict(touch=a + k, fill=a + r, x1=a + f['x1'], x3=a + f['q'], y1=a + f['y1'], y3=a + f['y3'],
+                            etype=f.get('etype', 'limit_ifvg'), ifvg_top=_price(d, Lv, f['top']),
                             n_ifvg=f['n'], entry=_price(d, Lv, fp), sl=_price(d, Lv, f['sl']),
                             ent_lvl=_price(d, Lv, f['ent']), z_lo=_price(d, Lv, z_lo),
                             bear=(_price(d, Lv, f['bb']), _price(d, Lv, f['bt'])),
@@ -401,18 +467,231 @@ def scan_ifvg(lv, e, M):
         j = int(np.flatnonzero(ok)[-1])                                 # FVG tidak searah terbaru yg valid
         y3 = int(sel[j]); y1 = y3 - 2
         n_ifvg += 1
-        f = dict(q=q, x1=x1, y1=y1, y3=y3, ent=min(float(bt[j]), ut), sl=float(l_[k:q + 1].min()),
-                 bb=float(bb[j]), bt=float(bt[j]), ub=ub, ut=ut, n=n_ifvg)
+        top = min(float(bt[j]), ut)                                     # tepi atas overlap IFVG
+        f = dict(q=q, x1=x1, y1=y1, y3=y3, ent=top, top=top, sl=float(l_[k:q + 1].min()),
+                 bb=float(bb[j]), bt=float(bt[j]), ub=ub, ut=ut, n=n_ifvg, etype='limit_ifvg')
+        if IFVG_ENTRY == 'market':                                      # selalu market di open candle setelah x3
+            f['mkt'] = True; f['etype'] = 'market'
+        elif IFVG_ENTRY in ('level', 'mix'):
+            if top > EPS:                                               # IFVG di ATAS level
+                if IFVG_ENTRY == 'level':
+                    f['ent'] = 0.0; f['etype'] = 'limit_level'          # level: limit di level H1 | mix: tetap limit di tepi IFVG
+            else:                                                       # IFVG di BAWAH level -> market order
+                f['mkt'] = True; f['etype'] = 'market'
         if pend is not None:                                            # limit lama masih hidup sampai candle q (inklusif)
             r = _fill_in(pend, q)
             if r is not None:
                 return _result(pend, r)
         pend = f
+        if f.get('mkt'):                                                # market: tidak menunggu, eksekusi di open candle q+1
+            if q + 1 < m:
+                return _result(f, q + 1)
+            return 'no_fill', None
     if pend is None:
         return 'no_ifvg', None
     r = _fill_in(pend, m - 1)
     if r is not None:
         return _result(pend, r)
+    return 'no_fill', None
+
+
+def _m5_fvg(o, h, l, c, i, d, n):
+    """FVG searah level M5 di C1..C{FVG_LAST_C} (aturan sama dgn activate_level H1). d='Long' = FVG bullish (support),
+    d='Short' = FVG bearish (resisten), pada koordinat relatif (sudah dicerminkan). Return (a, k) atau None."""
+    for a_ in range(i, i + FVG_LAST_C - 2):
+        k = a_ + 2
+        if k > i + FVG_LAST_C - 1 or k >= n:
+            continue
+        b_ = a_ + 1
+        if d == 'Long':
+            ok = l[k] > h[a_] and c[k] > h[b_]
+        else:
+            ok = h[k] < l[a_] and c[k] < l[b_]
+        if ok:
+            return (a_, k)
+    return None
+
+
+def _m5_levels(o, h, l, c, lo):
+    """Support & resisten M5 berFVG pada koordinat relatif (c1 >= lo). Level = close c1, c3 bersih, FVG di C1..C4,
+    gugur kalau harga menyentuh level antara c4 s/d candle penutup FVG. Return (list_support, list_resisten);
+    tiap item: dict(i=c1, a, k, L, bot, top) dgn zona FVG [bot, top]."""
+    m = len(c)
+    sup, res = [], []
+    if m < 6:
+        return sup, res
+    idx = np.arange(lo, m - 4)
+    if len(idx) == 0:
+        return sup, res
+    sm = (c[idx] < o[idx]) & (c[idx + 1] > o[idx + 1]) & (l[idx + 2] > c[idx] + WICK_EPS)
+    rm = (c[idx] > o[idx]) & (c[idx + 1] < o[idx + 1]) & (h[idx + 2] < c[idx] - WICK_EPS)
+    for i in idx[sm]:
+        i = int(i); fv = _m5_fvg(o, h, l, c, i, 'Long', m)
+        if fv is None:
+            continue
+        a_, k = fv; L = float(c[i])
+        if (l[i + 3:k + 1] <= L + WICK_EPS).any():
+            continue
+        sup.append(dict(i=i, a=a_, k=k, L=L, bot=float(h[a_]), top=float(l[k])))
+    for i in idx[rm]:
+        i = int(i); fv = _m5_fvg(o, h, l, c, i, 'Short', m)
+        if fv is None:
+            continue
+        a_, k = fv; L = float(c[i])
+        if (h[i + 3:k + 1] >= L - WICK_EPS).any():
+            continue
+        res.append(dict(i=i, a=a_, k=k, L=L, bot=float(h[k]), top=float(l[a_])))
+    return sup, res
+
+
+def scan_m5sr(lv, e, M):
+    """Konfirmasi M5 'S&R M5 berFVG -> IFVG' setelah level H1 aktif sampai indeks e. Long (Short = cermin):
+     1) SENTUH: candle M5 pertama dgn low <= level H1 (indeks k).
+     2) RESISTEN M5 berFVG (c1 bullish, c2 bearish, R = close c1, c3 bersih, FVG bearish C1..C4) dgn c1 >= k - M5SR_LOOKBACK.
+     3) SUPPORT M5 berFVG (c1 bearish, c2 bullish, c3 bersih, FVG bullish C1..C4) yg c1-nya SETELAH FVG resisten selesai.
+     4) FVG support MEM-BREAK R: close candle ke-3 FVG support > R.
+     5) IFVG = overlap FVG bullish support x FVG bearish resisten (bagian overlap belum tersentuh sejak FVG resisten selesai
+        s/d sebelum FVG support mulai). ENTRY limit di tepi ATAS overlap = min(atas zona bearish, atas zona bullish).
+     6) SL = low terendah sejak sentuh s/d FVG support selesai, dikurangi SL_BUFFER_PCT (Short: high tertinggi + buffer).
+     7) Pasangan baru sebelum limit lama terisi -> limit pindah. Tanpa expired.
+    Return (status, info) seperti scan_ifvg; status 'no_ifvg' = tidak ada pasangan resisten-support yg valid."""
+    TS = M['TS']; d, Lv = lv['d'], lv['L']
+    a = int(np.searchsorted(TS, lv['act_ts'], side='left'))
+    if a >= e:
+        return 'no_touch', None
+    o_, h_, l_, c_ = _mirror(M, Lv, d, a, e)
+    m = len(o_)
+    tch = np.flatnonzero(l_ <= EPS)
+    if len(tch) == 0:
+        return 'no_touch', None
+    k = int(tch[0])
+    sup, res = _m5_levels(o_, h_, l_, c_, max(0, k - M5SR_LOOKBACK))
+    if not sup or not res:
+        return 'no_ifvg', None
+
+    cands = []
+    for s_ in sorted(sup, key=lambda z: z['k']):
+        best = None
+        for r_ in res:
+            if r_['k'] >= s_['i']:                                       # support terbentuk setelah resisten aktif
+                continue
+            if not (c_[s_['k']] > r_['L'] + EPS):                        # FVG support harus mem-break resisten
+                continue
+            ub, ut, bb, bt = s_['bot'], s_['top'], r_['bot'], r_['top']
+            if not (ub < bt and ut > bb):                                # FVG support 'mengambil' FVG resisten
+                continue
+            if s_['a'] - 1 >= r_['k'] + 1 and h_[r_['k'] + 1:s_['a']].max() > max(bb, ub) + EPS:
+                continue                                                 # overlap sudah tersentuh sebelum FVG support
+            if best is None or r_['k'] > best['k']:
+                best = r_
+        if best is not None:
+            cands.append((s_, best))
+    if not cands:
+        return 'no_ifvg', None
+
+    def _fill_in(f, last_idx):
+        s0 = f['q'] + 1
+        if s0 > last_idx:
+            return None
+        hit = l_[s0:last_idx + 1] <= f['ent'] + EPS
+        return s0 + int(hit.argmax()) if hit.any() else None
+
+    def _result(f, r):
+        fp = min(f['ent'], float(o_[r]))
+        fp_p = _price(d, Lv, fp)
+        sl_p = _price(d, Lv, f['sl'])
+        sl_p = sl_p * (1 - SL_BUFFER_PCT) if d == 'Long' else sl_p * (1 + SL_BUFFER_PCT)
+        if (d == 'Long' and fp_p <= sl_p) or (d == 'Short' and fp_p >= sl_p):
+            return 'sl_invalid', None
+        z_lo = max(f['bb'], f['ub'])
+        return 'fill', dict(touch=a + k, fill=a + r, x1=a + f['x1'], x3=a + f['q'], y1=a + f['y1'], y3=a + f['y3'],
+                            n_ifvg=f['n'], entry=fp_p, sl=sl_p, ent_lvl=_price(d, Lv, f['ent']), z_lo=_price(d, Lv, z_lo),
+                            bear=(_price(d, Lv, f['bb']), _price(d, Lv, f['bt'])),
+                            bull=(_price(d, Lv, f['ub']), _price(d, Lv, f['ut'])), res_level=_price(d, Lv, f['rL']))
+
+    pend = None
+    n_ifvg = 0
+    for s_, r_ in cands:                                                 # urut waktu FVG support selesai
+        q = s_['k']
+        ub, ut, bb, bt = s_['bot'], s_['top'], r_['bot'], r_['top']
+        n_ifvg += 1
+        f = dict(q=q, x1=s_['a'], y1=r_['a'], y3=r_['k'], ent=min(bt, ut), sl=float(l_[k:q + 1].min()),
+                 bb=bb, bt=bt, ub=ub, ut=ut, rL=r_['L'], n=n_ifvg)
+        if pend is not None:
+            rr = _fill_in(pend, q)
+            if rr is not None:
+                return _result(pend, rr)
+        pend = f
+    rr = _fill_in(pend, m - 1)
+    if rr is not None:
+        return _result(pend, rr)
+    return 'no_fill', None
+
+
+def scan_m5res(lv, e, M):
+    """Konfirmasi M5 'resisten M5 berFVG di-break body -> entry di level resisten'. Long (Short = cermin):
+     1) SENTUH: candle M5 pertama dgn low <= level H1 (indeks k).
+     2) RESISTEN M5 berFVG (c1 bullish, c2 bearish, R = close c1, c3 bersih, FVG bearish C1..C4), c1 >= k - M5SR_LOOKBACK.
+     3) BREAK BODY: candle M5 pertama SETELAH FVG resisten selesai (dan setelah/saat sentuh) yg close > R.
+     4) ENTRY limit di R, dipasang saat candle break closed. Fill = candle pertama sesudahnya dgn low <= R,
+        harga fill = min(R, open). Resisten baru yg di-break sebelum fill -> limit pindah. Tanpa expired.
+     5) SL = low terendah sejak sentuh s/d candle break, dikurangi SL_BUFFER_PCT (Short: high tertinggi + buffer).
+    Return (status, info) seperti scan_ifvg; 'no_ifvg' = tidak ada resisten berFVG yg di-break."""
+    TS = M['TS']; d, Lv = lv['d'], lv['L']
+    a = int(np.searchsorted(TS, lv['act_ts'], side='left'))
+    if a >= e:
+        return 'no_touch', None
+    o_, h_, l_, c_ = _mirror(M, Lv, d, a, e)
+    m = len(o_)
+    tch = np.flatnonzero(l_ <= EPS)
+    if len(tch) == 0:
+        return 'no_touch', None
+    k = int(tch[0])
+    _, res = _m5_levels(o_, h_, l_, c_, max(0, k - M5SR_LOOKBACK))
+    cands = []
+    for r_ in res:
+        j0 = max(r_['k'] + 1, k)                                         # break harus terjadi SETELAH sentuh
+        if j0 >= m:
+            continue
+        hit = np.flatnonzero(c_[j0:] > r_['L'] + EPS)
+        if len(hit):
+            cands.append((j0 + int(hit[0]), r_))
+    if not cands:
+        return 'no_ifvg', None
+    cands.sort(key=lambda z: (z[0], z[1]['k']))
+
+    def _fill_in(f, last_idx):
+        s0 = f['q'] + 1
+        if s0 > last_idx:
+            return None
+        hit = l_[s0:last_idx + 1] <= f['ent'] + EPS
+        return s0 + int(hit.argmax()) if hit.any() else None
+
+    def _result(f, r):
+        fp = min(f['ent'], float(o_[r]))
+        fp_p = _price(d, Lv, fp)
+        sl_p = _price(d, Lv, f['sl'])
+        sl_p = sl_p * (1 - SL_BUFFER_PCT) if d == 'Long' else sl_p * (1 + SL_BUFFER_PCT)
+        if (d == 'Long' and fp_p <= sl_p) or (d == 'Short' and fp_p >= sl_p):
+            return 'sl_invalid', None
+        ent_p = _price(d, Lv, f['ent'])
+        return 'fill', dict(touch=a + k, fill=a + r, x1=a + f['y1'], x3=a + f['q'], y1=a + f['y1'], y3=a + f['y3'],
+                            n_ifvg=f['n'], entry=fp_p, sl=sl_p, ent_lvl=ent_p, z_lo=ent_p,
+                            bear=(_price(d, Lv, f['bb']), _price(d, Lv, f['bt'])), bull=(ent_p, ent_p), res_level=ent_p)
+
+    pend = None
+    n = 0
+    for q, r_ in cands:                                                  # urut waktu break
+        n += 1
+        f = dict(q=q, y1=r_['a'], y3=r_['k'], ent=r_['L'], sl=float(l_[k:q + 1].min()), bb=r_['bot'], bt=r_['top'], n=n)
+        if pend is not None:
+            rr = _fill_in(pend, q)
+            if rr is not None:
+                return _result(pend, rr)
+        pend = f
+    rr = _fill_in(pend, m - 1)
+    if rr is not None:
+        return _result(pend, rr)
     return 'no_fill', None
 
 
@@ -444,20 +723,124 @@ def opposite_levels(H1, M, d, raw, st0):
     return out
 
 
+def farthest_move_tp(H1, M, c1, touch, d):
+    """TP = pergerakan terjauh (basis H1) setelah level terbentuk, sebelum harga kembali menyentuh level.
+    Candle H1 sentuh = candle H1 yang memuat candle M5 sentuh (indeks M5 `touch`). Rentang = candle H1 c2 (candle setelah c1,
+    saat level terbentuk) s/d SEBELUM candle H1 sentuh. Long -> high tertinggi; Short -> low terendah.
+    Return None kalau rentang kosong."""
+    ht = int(np.searchsorted(H1['ts'], int(M['TS'][touch]), side='right')) - 1
+    s0 = c1 + 1
+    if ht <= s0:
+        return None
+    if d == 'Long':
+        return float(H1['h'][s0:ht].max())
+    return float(H1['l'][s0:ht].min())
+
+
+SCAN_WINDOW0 = 3000      # candle M5 (~10 hari): jendela awal scan; diperlebar x4 kalau belum ada fill (hasil identik dgn scan penuh)
+
+
+def scan_windowed(fn, lv, e, M):
+    """Jalankan scan_* bertahap pada jendela yg makin lebar. Fill yg ditemukan di dalam jendela = hasil yg sama dgn scan penuh
+    (kandidat setelah jendela baru muncul sesudah fill itu), jadi level yg tersimpan lama tidak membuat scan jadi berat."""
+    a = int(np.searchsorted(M['TS'], lv['act_ts'], side='left'))
+    W = SCAN_WINDOW0
+    while True:
+        e2 = min(e, a + W)
+        st, inf = fn(lv, e2, M)
+        if st in ('fill', 'sl_invalid') or e2 >= e:
+            return st, inf
+        W *= 4
+
+
+def swing_check(H1, c1, touch_ts, d):
+    """Validasi level lewat SWING sebelum level tersentuh (tanpa lookahead).
+    Long: dari c1 mundur cari high (wick) tertinggi 'kuat' = tak ada candle H1 yg lebih tinggi dlm SWING_N candle kiri & SWING_N kanan.
+    Short: cermin (low terendah). Pivot hanya dihitung kalau candle kanan ke-N sudah CLOSED sebelum touch_ts.
+    Valid kalau ada close H1 yg melewati swing (BREAK body) sebelum touch. Return (ok, alasan):
+    'break' | 'not_broken' (tak ditembus) | 'sweep' (wick menembus, close tidak) | 'no_pivot'."""
+    N = SWING_N
+    ilast = int(np.searchsorted(H1['ts'] + H1_MS, touch_ts, side='right')) - 1      # candle H1 terakhir yg sudah closed sebelum sentuh
+    hi = H1['h'] if d == 'Long' else -H1['l']
+    cl = H1['c'] if d == 'Long' else -H1['c']
+    jmax = min(c1, ilast - N)
+    jmin = max(N, c1 - SWING_MAX_BACK)
+    for j in range(jmax, jmin - 1, -1):
+        if hi[j] >= hi[j - N:j + N + 1].max():
+            brk = np.flatnonzero(cl[j + 1:ilast + 1] > hi[j])
+            if len(brk):
+                if SWING_SWEEP_FAIL:
+                    exc = np.flatnonzero(hi[j + 1:ilast + 1] > hi[j])      # candle pertama yg wick-nya menembus swing
+                    if exc[0] < brk[0]:
+                        return False, 'sweep'                               # menembus dulu lewat sweep (close tidak melewati) -> gagal
+                return True, 'break'
+            if (hi[j + 1:ilast + 1] > hi[j]).any():
+                return False, 'sweep'
+            return False, 'not_broken'
+    return False, 'no_pivot'
+
+
+def idm_check(H1, idm_idx, c1, touch_ts, d):
+    """Level H1 harus punya INDUCEMENT (IDM). IDM = level tanpa FVG (pola raw_levels: c1+c2, c3 bersih), searah level (IDM_TYPE=same;
+    Long -> support kecil, Short -> resisten kecil), opposite = lawan arah, any = keduanya. Urutan Long: support berFVG -> IDM -> candle tertinggi
+    -> harga menyentuh level lagi. 'Candle tertinggi' = candle H1 dgn high tertinggi (Short: low terendah) dari SETELAH c2 (c1+2) s/d sebelum
+    candle H1 sentuh = puncak pergerakan (BUKAN swing masa lalu). IDM boleh terbentuk sebelum ATAU sesudah swing di-break; syarat: c1 IDM >= c2 level,
+    c2 IDM <= candle tertinggi, dan c3 IDM sudah closed sebelum sentuh. Return (ok, alasan): 'ok' | 'none'."""
+    ht = int(np.searchsorted(H1['ts'], touch_ts, side='right')) - 1            # candle H1 yg memuat sentuh (belum closed)
+    lo_i, hi_i = c1 + 2, ht - 1
+    if hi_i < lo_i:
+        return False, 'none'
+    seg = H1['h'][lo_i:hi_i + 1] if d == 'Long' else H1['l'][lo_i:hi_i + 1]
+    jh = lo_i + int(seg.argmax() if d == 'Long' else seg.argmin())            # candle tertinggi/terendah
+    types = {'same': [d], 'opposite': ['Short' if d == 'Long' else 'Long'], 'any': ['Long', 'Short']}.get(IDM_TYPE, [d])
+    for t in types:
+        arr = idm_idx[t]
+        k0 = int(np.searchsorted(arr, c1 + 1, side='left'))                    # c1 IDM >= c2 level
+        if k0 < len(arr):
+            i = int(arr[k0])
+            if i + 1 <= jh and i + 2 <= ht - 1:
+                return True, 'ok'
+    return False, 'none'
+
+
+def bias_touch_check(ea, eb, H1ts, touch_ts, d, kk):
+    """Bias EMA21/30 saat LEVEL TERSENTUH (candle H1 terakhir yg CLOSED sebelum candle sentuh; tanpa lookahead).
+    Long valid kalau EMA21 > EMA30, Short kalau EMA21 <= EMA30. Return (ok, pulih): pulih=True kalau bias saat level aktif (candle kk)
+    TIDAK searah tapi saat sentuh searah, yaitu ada EMA cross yg memulihkan bias antara level terbentuk s/d tersentuh."""
+    il = int(np.searchsorted(H1ts, touch_ts, side='right')) - 2
+    if il < EMA_WARMUP:
+        return False, False
+    ok = (d == 'Long') == bool(ea[il] > eb[il])
+    act_ok = (d == 'Long') == bool(ea[kk] > eb[kk])
+    return ok, (ok and kk >= EMA_WARMUP and not act_ok)        # kk < warm-up: bias awal tak bisa dinilai -> tidak dihitung 'pulih'
+
+
+def slope_check(e30, H1ts, touch_ts, d):
+    """Slope EMA30 searah saat sentuh. i = candle H1 terakhir yg CLOSED sebelum candle H1 yg memuat sentuh (tanpa lookahead).
+    Long valid kalau EMA30[i] > EMA30[i-SLOPE_LB]; Short kalau lebih kecil. Data kurang -> tidak valid."""
+    il = int(np.searchsorted(H1ts, touch_ts, side='right')) - 2
+    if il - SLOPE_LB < 0:
+        return False
+    diff = e30[il] - e30[il - SLOPE_LB]
+    return diff > 0 if d == 'Long' else diff < 0
+
+
 def detect_snr_events(df, m5):
     """Level H1 (c1/c2 + c3 bersih) + FVG H1 C1..C5 + level tidak diulang sebelum FVG + bias EMA21/EMA30
-    -> monitoring M5 (sentuh -> Inverted FVG) -> LIMIT di IFVG, SL kedalaman terjauh sejak sentuh.
-    Exit: TARGET = ujung wick level lawan (H1 + FVG) terbaru yg belum tercapai (lihat run_combined_backtest).
+    -> monitoring M5 (sentuh -> ENTRY_MODE: m5res = resisten M5 berFVG di-break body, entry di level | m5sr = S&R M5 -> IFVG | ifvg = IFVG biasa) -> LIMIT di IFVG, SL kedalaman terjauh (m5sr: + buffer).
+    Exit: TP_MODE=far -> pergerakan terjauh H1 (farthest_move_tp); TP_MODE=opp -> target level lawan dinamis (opposite_levels).
     Return (events, stats). events urut fill_ts, dict:
-    {'kind','type','level','direction','entry_price','sl_price','fill_ts','test1_ts','test2_ts','c1_ts','targets','meta'}"""
-    stats = {'levels': 0, 'tanpa_fvg': 0, 'sudah_disentuh': 0, 'ulang': 0, 'warmup': 0, 'ema_ditolak': 0, 'aktif': 0,
-             'no_touch': 0, 'no_ifvg': 0, 'no_fill': 0, 'sl_invalid': 0, 'entry': 0}
+    {'kind','type','level','direction','entry_price','sl_price','tp_price','fill_ts','test1_ts','test2_ts','c1_ts','meta'}"""
+    stats = {'levels': 0, 'tanpa_fvg': 0, 'sudah_disentuh': 0, 'ulang': 0, 'warmup': 0, 'ema_ditolak': 0, 'bias_touch': 0, 'bias_pulih': 0, 'rr_kurang': 0, 'rr_diperbesar': 0, 'ema_touch': 0, 'ema_level': 0, 'swing_no_pivot': 0, 'swing_not_broken': 0, 'swing_sweep': 0, 'idm_none': 0, 'slope_ditolak': 0, 'aktif': 0,
+             'no_touch': 0, 'no_ifvg': 0, 'no_fill': 0, 'sl_invalid': 0, 'tp_invalid': 0, 'entry': 0}
     events = []
     if m5 is None or df is None or len(df) < 10:
         return events, stats
     H1 = {k: df[v].values.astype(float) for k, v in (('o', 'open'), ('h', 'high'), ('l', 'low'), ('c', 'close'))}
     H1['ts'] = df['ts'].values.astype(np.int64)
     raw = raw_levels(H1['o'], H1['h'], H1['l'], H1['c'])
+    idm_idx = {t: np.array(sorted(x['c1'] for x in raw if x['d'] == t), dtype=np.int64) for t in ('Long', 'Short')}
+    e30_all = pd.Series(H1['c']).ewm(span=BIAS_EMA_SLOW, adjust=False).mean().values if SLOPE_FILTER else None
     stats['levels'] = len(raw)
     acts = [x for x in (activate_level(lv, H1, stats) for lv in raw) if x is not None]
     keep = []
@@ -467,10 +850,10 @@ def detect_snr_events(df, m5):
         else:
             keep.append(x)
     acts = keep
-    if EMA_BIAS_FILTER:
-        cs = pd.Series(H1['c'])
-        ea = cs.ewm(span=BIAS_EMA_FAST, adjust=False).mean().values
-        eb = cs.ewm(span=BIAS_EMA_SLOW, adjust=False).mean().values
+    cs_ = pd.Series(H1['c'])
+    ea = cs_.ewm(span=BIAS_EMA_FAST, adjust=False).mean().values
+    eb = cs_.ewm(span=BIAS_EMA_SLOW, adjust=False).mean().values
+    if EMA_BIAS_FILTER and BIAS_AT == 'act':
         keep = []
         for x in acts:
             kk = x['fvg'][1]
@@ -482,31 +865,108 @@ def detect_snr_events(df, m5):
             else:
                 stats['ema_ditolak'] += 1
         acts = keep
+    if LEVEL_EMA_TOUCH in ('both', 'any'):
+        e21 = pd.Series(H1['c']).ewm(span=BIAS_EMA_FAST, adjust=False).mean().values
+        keep = []
+        for x in acts:
+            i = x['c1']
+            if i < EMA_WARMUP:
+                stats['warmup'] += 1
+                continue
+            t1 = bool(H1['l'][i] <= e21[i] <= H1['h'][i])
+            t2 = bool(H1['l'][i + 1] <= e21[i + 1] <= H1['h'][i + 1])
+            if (t1 and t2) if LEVEL_EMA_TOUCH == 'both' else (t1 or t2):
+                keep.append(x)
+            else:
+                stats['ema_touch'] += 1
+        acts = keep
+    if LEVEL_VS_EMA in ('c1', 'act'):
+        e30 = pd.Series(H1['c']).ewm(span=BIAS_EMA_SLOW, adjust=False).mean().values
+        keep = []
+        for x in acts:
+            i = x['c1']
+            if i < EMA_WARMUP:
+                stats['warmup'] += 1
+                continue
+            j = i if LEVEL_VS_EMA == 'c1' else x['fvg'][1]
+            ok = x['L'] > e30[j] if x['d'] == 'Long' else x['L'] < e30[j]
+            if ok:
+                keep.append(x)
+            else:
+                stats['ema_level'] += 1
+        acts = keep
     stats['aktif'] = len(acts)
 
-    st0 = {'tanpa_fvg': 0, 'sudah_disentuh': 0}
-    OPP = {d: opposite_levels(H1, m5, d, raw, st0) for d in ('Long', 'Short')}
+    OPP = {}
+    if TP_MODE == 'opp':
+        st0 = {'tanpa_fvg': 0, 'sudah_disentuh': 0}
+        OPP = {d: opposite_levels(H1, m5, d, raw, st0) for d in ('Long', 'Short')}
     TS = m5['TS']
     for d in ('Long', 'Short'):
         lst = sorted([x for x in acts if x['d'] == d], key=lambda x: x['act_ts'])
         for j, lv in enumerate(lst):
-            e = int(np.searchsorted(TS, lst[j + 1]['act_ts'], side='left')) if j + 1 < len(lst) else len(TS)
-            status, inf = scan_ifvg(lv, e, m5)
+            if LEVEL_MODE == 'replace' and j + 1 < len(lst):
+                e = int(np.searchsorted(TS, lst[j + 1]['act_ts'], side='left'))     # level baru menggantikan
+            else:
+                e = len(TS)                                                           # level tetap aktif sampai tersentuh
+            status, inf = scan_windowed({'m5res': scan_m5res, 'm5sr': scan_m5sr}.get(ENTRY_MODE, scan_ifvg), lv, e, m5)
             if status != 'fill':
                 stats[status] += 1
                 continue
+            if SWING_VALID:
+                ok, why = swing_check(H1, lv['c1'], int(TS[inf['touch']]), d)
+                if not ok:
+                    stats['swing_' + why] += 1       # swing tidak di-break / hanya sweep / tak ada swing -> level tidak valid
+                    continue
+            if EMA_BIAS_FILTER and BIAS_AT == 'touch':
+                ok, pulih = bias_touch_check(ea, eb, H1['ts'], int(TS[inf['touch']]), d, lv['fvg'][1])
+                if not ok:
+                    stats['bias_touch'] += 1         # bias EMA21/30 saat sentuh tidak searah -> level tidak valid
+                    continue
+                if pulih:
+                    stats['bias_pulih'] += 1         # bias awal salah, EMA cross memulihkan sebelum sentuh -> tetap valid
+            if SLOPE_FILTER:
+                if not slope_check(e30_all, H1['ts'], int(TS[inf['touch']]), d):
+                    stats['slope_ditolak'] += 1      # EMA30 menentang arah saat sentuh -> level tidak valid
+                    continue
+            if IDM_FILTER:
+                ok, why = idm_check(H1, idm_idx, lv['c1'], int(TS[inf['touch']]), d)
+                if not ok:
+                    stats['idm_none'] += 1           # tidak ada inducement antara c2 s/d candle tertinggi -> level tidak valid
+                    continue
+            tp = None
+            tp_ext = False
+            if TP_MODE == 'rr':
+                risk = abs(inf['entry'] - inf['sl'])
+                tp = inf['entry'] + TP_RR * risk if d == 'Long' else inf['entry'] - TP_RR * risk      # TP tetap RR 1:TP_RR
+            elif TP_MODE != 'opp':
+                tp = farthest_move_tp(H1, m5, lv['c1'], inf['touch'], d)
+                risk = abs(inf['entry'] - inf['sl'])
+                bad = tp is None or (d == 'Long' and tp <= inf['entry']) or (d == 'Short' and tp >= inf['entry'])
+                if MIN_RR > 0 and MIN_RR_MODE == 'extend':
+                    if bad or abs(tp - inf['entry']) < MIN_RR * risk:
+                        tp = inf['entry'] + MIN_RR * risk if d == 'Long' else inf['entry'] - MIN_RR * risk      # perbesar TP sampai RR = MIN_RR
+                        tp_ext = True
+                        stats['rr_diperbesar'] += 1
+                else:
+                    if bad:
+                        stats['tp_invalid'] += 1      # TP tidak di sisi profit dari harga fill -> setup dibuang
+                        continue
+                    if MIN_RR > 0 and abs(tp - inf['entry']) < MIN_RR * risk:
+                        stats['rr_kurang'] += 1       # RR (jarak TP / jarak SL) di bawah minimum -> setup digugurkan
+                        continue
             stats['entry'] += 1
             f = inf['fill']; fv = lv['fvg']
             events.append({
                 'kind': 'SNR_SUPPORT' if d == 'Long' else 'SNR_RESISTANCE', 'type': lv['ty'], 'level': lv['L'],
-                'direction': d, 'entry_price': inf['entry'], 'sl_price': inf['sl'], 'fill_ts': int(TS[f]),
+                'direction': d, 'entry_price': inf['entry'], 'sl_price': inf['sl'], 'tp_price': tp, 'targets': OPP.get(d, []), 'fill_ts': int(TS[f]),
                 'test1_ts': int(TS[inf['touch']]), 'test2_ts': int(TS[inf['x3']]), 'c1_ts': int(H1['ts'][lv['c1']]),
-                'targets': OPP[d],
                 'meta': {
                     'fvg_h1': (int(H1['ts'][fv[0]]), int(H1['ts'][fv[1]])), 'level_aktif': int(lv['act_ts']),
                     'touch_ts': int(TS[inf['touch']]), 'y1_ts': int(TS[inf['y1']]), 'y3_ts': int(TS[inf['y3']]),
                     'x1_ts': int(TS[inf['x1']]), 'x3_ts': int(TS[inf['x3']]), 'n_ifvg': inf['n_ifvg'],
                     'bear': inf['bear'], 'bull': inf['bull'], 'ifvg_entry': inf['ent_lvl'], 'ifvg_low': inf['z_lo'],
+                    'res_m5': inf.get('res_level'), 'tp_ext': tp_ext, 'etype': inf.get('etype'), 'ifvg_top': inf.get('ifvg_top'),
                 },
             })
     events.sort(key=lambda e: e['fill_ts'])
@@ -560,7 +1020,7 @@ def prepare_coin(symbol, df, m5):
 # Tiap event dari detect_all_events() = LIMIT di IFVG yang sudah terfill di fill_ts (entry_price = harga fill,
 # sl_price = kedalaman terjauh sejak sentuh). Posisi dibuka saat waktu (M5) sampai di fill_ts. Slot/margin/min order
 # tidak cukup, atau sudah ada posisi searah di koin yang sama -> setup hangus.
-# EXIT: SL tetap; TARGET dinamis = ujung wick level lawan terbaru (H1+FVG) yang belum tersentuh & lebih jauh dari entry.
+# EXIT: SL tetap; TP tetap = pergerakan terjauh (H1) setelah level terbentuk s/d sebelum candle H1 sentuh (ev['tp_price']).
 
 def _cand_targets(targets, direction, E, fill_ts):
     """Saring kandidat target sekali saat entry: wick T & level di sisi profit dari entry, dan belum tersentuh
@@ -579,10 +1039,24 @@ def _cand_targets(targets, direction, E, fill_ts):
 
 
 def _current_target(pos, now_ts):
-    """Target aktif di candle now_ts: level lawan yang sudah aktif (act<=now), belum tersentuh (ft>=now); pilih c1 TERBARU."""
+    """Target aktif di candle now_ts: level lawan yang sudah aktif (act<=now) dan belum tersentuh (ft>=now), di sisi profit dari entry.
+    TARGET_PICK=farthest: yang TERJAUH dari entry (Long: T terbesar; Short: T terkecil) | nearest: yang TERDEKAT | newest: c1 TERBARU.
+    Seri -> c1 terbaru."""
+    long_ = pos.get('direction') == 'Long'
     best = None
     for act, ft, T, c1 in pos['targets']:
-        if act <= now_ts <= ft and (best is None or c1 > best[1]):
+        if not (act <= now_ts <= ft):
+            continue
+        if best is None:
+            best = (T, c1)
+            continue
+        if TARGET_PICK == 'farthest':
+            better = (T > best[0]) if long_ else (T < best[0])
+        elif TARGET_PICK == 'nearest':
+            better = (T < best[0]) if long_ else (T > best[0])
+        else:
+            better = c1 > best[1]
+        if better or (TARGET_PICK in ('farthest', 'nearest') and T == best[0] and c1 > best[1]):
             best = (T, c1)
     return None if best is None else best[0]
 
@@ -638,7 +1112,8 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
             'dist': dist, 'qty': qty, 'entry_ts': entry_ts, 'level': ev['level'],
             'kind': ev['kind'], 'margin': margin_needed,
             'c1_ts': ev['c1_ts'], 'test1_ts': ev['test1_ts'], 'test2_ts': ev['test2_ts'], 'meta': ev.get('meta', {}),
-            'fill_ts': entry_ts, 'targets': _cand_targets(ev['targets'], direction, entry_price, entry_ts),
+            'fill_ts': entry_ts, 'tp': ev['tp_price'],
+            'targets': _cand_targets(ev['targets'], direction, entry_price, entry_ts) if TP_MODE == 'opp' else [],
         }
         total_margin_used += margin_needed
         positions_by_symbol.setdefault(symbol, set()).add(key)
@@ -657,7 +1132,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         r_mult = pnl_net / (dist * qty) if dist * qty > 0 else 0
         trades.append({
             'symbol': pos['symbol'], 'direction': direction, 'entry': entry, 'sl': pos['sl'],
-            'exit': exit_price, 'reason': reason, 'r_mult': r_mult, 'pnl_usd': pnl_net,
+            'tp': (pos['tp'] if TP_MODE != 'opp' else (exit_price if reason == 'TP' else None)), 'exit': exit_price, 'reason': reason, 'r_mult': r_mult, 'pnl_usd': pnl_net,
             'entry_ts': pos['entry_ts'], 'exit_ts': exit_ts, 'balance_after': balance,
             'level': pos['level'], 'kind': pos['kind'],
             'level_formed_ts': pos['c1_ts'],
@@ -673,8 +1148,8 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
         now_ts = int(m5['TS'][j])
         hi, lo = m5['H'][j], m5['L'][j]
 
-        # 1) exit posisi aktif simbol ini. Urutan per candle: SL dulu (exit = min/max(SL, open) utk gap), lalu TARGET
-        #    (exit = max/min(T, open)). Candle fill (entry_ts == now_ts) tidak dicek TP.
+        # 1) exit posisi aktif simbol ini. Urutan per candle: SL dulu (exit = min/max(SL, open) utk gap), lalu TP
+        #    (exit = max/min(TP, open)). Candle fill (entry_ts == now_ts) tidak dicek TP.
         op = m5['O'][j]
         keys = positions_by_symbol.get(symbol)
         if keys:
@@ -686,7 +1161,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
                         close_trade(key, min(S, op), 'SL', now_ts)
                         continue
                     if pos['entry_ts'] < now_ts:
-                        T = _current_target(pos, now_ts)
+                        T = pos['tp'] if TP_MODE != 'opp' else _current_target(pos, now_ts)
                         if T is not None and hi >= T:
                             close_trade(key, max(T, op), 'TP', now_ts)
                 else:  # Short
@@ -694,7 +1169,7 @@ def run_combined_backtest(coins: dict, m5_data: dict) -> dict:
                         close_trade(key, max(S, op), 'SL', now_ts)
                         continue
                     if pos['entry_ts'] < now_ts:
-                        T = _current_target(pos, now_ts)
+                        T = pos['tp'] if TP_MODE != 'opp' else _current_target(pos, now_ts)
                         if T is not None and lo <= T:
                             close_trade(key, min(T, op), 'TP', now_ts)
 
@@ -883,10 +1358,10 @@ def _run():
     global _phase, _results, _kind_results, _per_coin_results, _all_trades, _combined_result
     global _monthly_results, _avg_monthly_growth
     try:
-        _log_msg(f"🚀 Mulai backtest SNR (level H1 + FVG H1 + bias EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW} + Inverted FVG M5, exit target level lawan) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
+        _log_msg(f"🚀 Mulai backtest SNR (level H1 + FVG H1 + bias EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW} + konfirmasi M5 [{ENTRY_MODE}], exit {_tp_desc(short=True)}) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
         _log_msg(f"   Level c1/c2 (c3 bersih) + FVG H1 di C1..C{FVG_LAST_C} + level tidak berulang sebelum FVG + bias EMA (filter={'ON' if EMA_BIAS_FILTER else 'OFF'}, warm-up {EMA_WARMUP}) "
-                  f"-> sentuh -> IFVG M5 (lookback {IFVG_LOOKBACK}) -> LIMIT di IFVG, SL = kedalaman terjauh sejak sentuh, tanpa expired. "
-                  f"Exit: TARGET = wick level lawan terbaru yang belum tersentuh (H1+FVG, tanpa EMA); SL dicek duluan.")
+                  f"-> sentuh -> " + (f"resisten M5 berFVG di-break body -> LIMIT di level resisten (lookback {M5SR_LOOKBACK}), SL = terjauh + {SL_BUFFER_PCT*100:.1f}%" if ENTRY_MODE == 'm5res' else f"resisten M5 berFVG di-break FVG support M5 -> IFVG (lookback {M5SR_LOOKBACK}), SL = terjauh + {SL_BUFFER_PCT*100:.1f}%" if ENTRY_MODE == 'm5sr' else f"IFVG M5 (lookback {IFVG_LOOKBACK}), SL = kedalaman terjauh") + ", tanpa expired. "
+                  f"Exit: {_tp_desc()}; SL dicek duluan.")
 
         coins = {}
         m5_data = {}
@@ -908,7 +1383,8 @@ def _run():
             st = cp['stats']
             _log_msg(f"   ✅ {symbol}: {cp['n']} candle H1, {st['levels']} level, {st['aktif']} aktif, {st['entry']} limit terfill ({kind_str or '-'}); "
                       f"gugur: tanpa FVG {st['tanpa_fvg']}, disentuh sebelum FVG {st['sudah_disentuh']}, level berulang {st['ulang']}, warm-up {st['warmup']}, "
-                      f"EMA {st['ema_ditolak']}; M5: tanpa sentuh {st['no_touch']}, tanpa IFVG {st['no_ifvg']}, limit tak terfill {st['no_fill']}, SL tidak valid {st['sl_invalid']}.")
+                      f"EMA {st['ema_ditolak']}, bias saat sentuh {st['bias_touch']} (pulih oleh cross {st['bias_pulih']}), tak sentuh EMA{BIAS_EMA_FAST} {st['ema_touch']}, level vs EMA{BIAS_EMA_SLOW} {st['ema_level']}; M5: tanpa sentuh {st['no_touch']}, tanpa IFVG {st['no_ifvg']}, limit tak terfill {st['no_fill']}, SL tidak valid {st['sl_invalid']}, TP tidak valid {st['tp_invalid']}, RR < {MIN_RR:g} {st['rr_kurang']}, TP diperbesar ke RR {MIN_RR:g} {st['rr_diperbesar']}; "
+                      f"swing: tak di-break {st['swing_not_broken']}, hanya sweep {st['swing_sweep']}, tanpa swing {st['swing_no_pivot']}; tanpa IDM {st['idm_none']}; slope EMA{BIAS_EMA_SLOW} menentang {st['slope_ditolak']}.")
 
         _log_msg(f"🧮 Menjalankan simulasi gabungan ({len(coins)} koin)...")
         result = run_combined_backtest(coins, m5_data)
@@ -941,9 +1417,12 @@ def _run():
                 'filled_count': sum_st('entry'),
                 'aktif_count': sum_st('aktif'), 'tanpa_fvg_count': sum_st('tanpa_fvg'),
                 'disentuh_count': sum_st('sudah_disentuh'), 'ulang_count': sum_st('ulang'),
-                'warmup_count': sum_st('warmup'), 'ema_count': sum_st('ema_ditolak'),
+                'warmup_count': sum_st('warmup'), 'ema_count': sum_st('ema_ditolak'), 'bias_touch_count': sum_st('bias_touch'), 'bias_pulih_count': sum_st('bias_pulih'), 'ema_touch_count': sum_st('ema_touch'), 'ema_level_count': sum_st('ema_level'),
+                'swing_invalid_count': sum_st('swing_no_pivot') + sum_st('swing_not_broken') + sum_st('swing_sweep'), 'idm_none_count': sum_st('idm_none'), 'slope_count': sum_st('slope_ditolak'),
+                'swing_not_broken_count': sum_st('swing_not_broken'), 'swing_sweep_count': sum_st('swing_sweep'), 'swing_no_pivot_count': sum_st('swing_no_pivot'),
                 'no_touch_count': sum_st('no_touch'), 'no_ifvg_count': sum_st('no_ifvg'),
                 'no_fill_count': sum_st('no_fill'), 'sl_invalid_count': sum_st('sl_invalid'),
+                'tp_invalid_count': sum_st('tp_invalid'), 'rr_kurang_count': sum_st('rr_kurang'), 'rr_diperbesar_count': sum_st('rr_diperbesar'),
             })
             _results[:] = per_symbol_breakdown(result['trades'])
             _kind_results[:] = per_kind_breakdown(result['trades'])
@@ -970,6 +1449,86 @@ def _run():
 
 def _fmt_max_concurrent():
     return 'Tanpa batas' if MAX_CONCURRENT == float('inf') else str(MAX_CONCURRENT)
+
+
+def _tp_desc(short=False) -> str:
+    if TP_MODE == 'opp':
+        pick = {'farthest': 'terjauh', 'nearest': 'terdekat', 'newest': 'terbaru'}.get(TARGET_PICK, TARGET_PICK)
+        return f"TP = level lawan {pick}" if short else f"TP = ujung wick level lawan {pick} (H1+FVG, tanpa EMA) yang belum tersentuh, dinamis"
+    if TP_MODE == 'rr':
+        return f"TP fix RR 1:{TP_RR:g}" if short else f"TP tetap = entry +/- {TP_RR:g} x jarak entry-SL (RR 1:{TP_RR:g})"
+    extra = ((f", minimal RR 1:{MIN_RR:g} (diperbesar kalau kurang)" if MIN_RR_MODE == 'extend' else f", setup RR < 1:{MIN_RR:g} digugurkan")) if MIN_RR > 0 else ""
+    return ("TP = pergerakan terjauh" + extra) if short else ("TP = pergerakan terjauh (H1) setelah level terbentuk s/d sebelum candle H1 sentuh" + extra)
+
+
+def _tp_html() -> str:
+    if TP_MODE == 'opp':
+        pick = {'farthest': 'terjauh', 'nearest': 'terdekat', 'newest': 'terbaru'}.get(TARGET_PICK, TARGET_PICK)
+        return (f"<b>TARGET</b> = ujung wick level lawan <b>{pick}</b> (H1+FVG, tanpa EMA) yang belum tersentuh dan lebih jauh dari entry; "
+                "level yang wick-nya sudah tersentuh dianggap terpakai dan dilewati; berubah dinamis. SL dicek duluan dalam candle yang sama; TP tidak dicek di candle fill.")
+    if TP_MODE == 'rr':
+        return (f"<b>TP</b> tetap = entry ± {TP_RR:g} × jarak entry-SL (RR 1:{TP_RR:g}). SL dicek duluan dalam candle yang sama; TP tidak dicek di candle fill.")
+    extra = ((f" Kalau jarak TP &lt; {MIN_RR:g} × jarak SL, TP <b>diperbesar</b> sampai RR 1:{MIN_RR:g}." if MIN_RR_MODE == 'extend' else
+              f" Setup dengan jarak TP &lt; {MIN_RR:g} × jarak SL (RR di bawah 1:{MIN_RR:g}) digugurkan.")) if MIN_RR > 0 else ""
+    return ("<b>TP</b> = pergerakan terjauh (candle H1) setelah level terbentuk s/d sebelum candle H1 yang menyentuh level "
+            "(Long: high tertinggi; Short: low terendah), tetap sejak entry." + extra + " SL dicek duluan dalam candle yang sama; TP tidak dicek di candle fill.")
+
+
+def _ematouch_html() -> str:
+    if LEVEL_EMA_TOUCH == 'both':
+        return f"candle c1 DAN c2 level H1 harus menyentuh EMA{BIAS_EMA_FAST} (low &lt;= EMA &lt;= high)"
+    if LEVEL_EMA_TOUCH == 'any':
+        return f"candle c1 ATAU c2 level H1 harus menyentuh EMA{BIAS_EMA_FAST}"
+    return "tidak dipakai (OFF)"
+
+
+def _levelema_html() -> str:
+    if LEVEL_VS_EMA in ('c1', 'act'):
+        at = 'candle c1 (saat level terbentuk)' if LEVEL_VS_EMA == 'c1' else 'candle FVG selesai'
+        return f"harga level harus di atas EMA{BIAS_EMA_SLOW} untuk Long, di bawahnya untuk Short (EMA diambil di {at})"
+    return "tidak dipakai (OFF)"
+
+
+def _swing_html() -> str:
+    if not SWING_VALID:
+        return "tidak dipakai (OFF)."
+    return (f"dari c1 mundur dicari wick tertinggi (Short: terendah) yang kuat, tak terlampaui {SWING_N} candle H1 di kiri dan {SWING_N} di kanan. "
+            "Level valid hanya kalau swing itu di-<b>break body</b> (close melewati) <b>sebelum level tersentuh</b>; "
+            "tidak di-break atau hanya <b>sweep</b> wick = level tidak valid.")
+
+
+def _slope_html() -> str:
+    if not SLOPE_FILTER:
+        return "tidak dipakai (OFF)."
+    return (f"saat level tersentuh, EMA{BIAS_EMA_SLOW} H1 harus searah: Long → naik, Short → turun "
+            f"(EMA{BIAS_EMA_SLOW} candle H1 terakhir yang sudah closed dibanding {SLOPE_LB} candle sebelumnya).")
+
+
+def _idm_html() -> str:
+    if not IDM_FILTER:
+        return "tidak dipakai (OFF)."
+    tp = {'same': 'searah level (Long: support kecil, Short: resisten kecil)', 'opposite': 'berlawanan arah dengan level', 'any': 'searah atau berlawanan'}.get(IDM_TYPE, IDM_TYPE)
+    return ("level H1 harus punya <b>IDM</b> = level tanpa FVG (pola c1+c2, c3 bersih), " + tp + ", di antara c2 level sampai <b>candle tertinggi</b> "
+            "(Short: terendah) = puncak pergerakan sebelum harga menyentuh level lagi. Urutan: level-FVG → IDM → candle tertinggi → sentuh level.")
+
+
+def _confirm_html() -> str:
+    if ENTRY_MODE == 'm5res':
+        return ("setelah level disentuh, tunggu <b>resisten M5 berFVG</b> (Short: support), lalu tunggu level itu di-<b>break body</b> "
+                "(close melewati level). Entry <b>limit</b> di level resisten M5 tersebut (retest); resisten baru yg di-break sebelum fill "
+                f"memindahkan limit. <b>SL</b> = kedalaman terjauh sejak sentuh s/d candle break + buffer {SL_BUFFER_PCT*100:.1f}%.")
+    if ENTRY_MODE == 'm5sr':
+        return ("setelah level disentuh, cari <b>resisten M5 berFVG</b> (Short: support), lalu level itu di-break oleh FVG dari "
+                "<b>support M5 berFVG</b> (Short: resisten); dari pergerakan itu terbentuk <b>IFVG</b> (overlap kedua FVG). "
+                "Entry <b>limit</b> di tepi atas overlap (Short: bawah); pasangan baru sebelum fill memindahkan limit. "
+                f"<b>SL</b> = kedalaman terjauh sejak sentuh s/d FVG support selesai + buffer {SL_BUFFER_PCT*100:.1f}%.")
+    ent = ("Saat IFVG terbentuk: kalau IFVG di <b>atas level H1</b> → entry <b>limit di level H1</b>; kalau IFVG di <b>bawah level</b> → <b>market order</b> "
+           "(open candle M5 berikutnya). " if IFVG_ENTRY == 'level' else
+           "<b>Market order</b> langsung di open candle M5 setelah IFVG selesai. " if IFVG_ENTRY == 'market' else
+           "Entry <b>limit</b> di tepi atas overlap (Short: bawah). ")
+    return (f"setelah level disentuh, FVG M5 searah harus 'mengambil' gap FVG M5 tidak searah (boleh terbentuk sampai {IFVG_LOOKBACK} "
+            "candle sebelum sentuh). " + ent + "IFVG baru sebelum fill memindahkan limit. "
+            "<b>SL</b> = kedalaman terjauh sejak sentuh s/d FVG searah selesai (tanpa buffer).")
 
 
 def _render_html() -> bytes:
@@ -1057,7 +1616,7 @@ def _render_html() -> bytes:
 </style>
 </head>
 <body>
-  <h1>📊 Backtest SNR (H1 level + FVG + EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW} bias + IFVG M5, target level lawan)</h1>
+  <h1>📊 Backtest SNR (H1 level + FVG + EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW} bias + {'resisten M5 di-break' if ENTRY_MODE == 'm5res' else 'S&R M5 → IFVG' if ENTRY_MODE == 'm5sr' else 'IFVG'} M5, {_tp_desc(short=True)})</h1>
   {status_html}
 
   <div class="cards">
@@ -1074,18 +1633,21 @@ def _render_html() -> bytes:
     <br>• <b>Level</b> (H1): c1+c2 berlawanan arah, level = close c1; c3 tidak boleh menyentuh level. Wajib ada <b>FVG H1 searah</b> di C1..C{FVG_LAST_C}
     (3 candle berurutan, gap saja; candle ke-3 close melewati wick candle ke-2). Level aktif saat FVG selesai. Gugur kalau harga sudah menyentuh level
     antara c4 s/d candle penutup FVG, atau kalau pasangan level searah muncul lagi sebelum FVG selesai.
-    <br>• <b>Bias EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW}</b> (level awal saja): Long hanya kalau EMA{BIAS_EMA_FAST} &gt; EMA{BIAS_EMA_SLOW}, Short kalau &lt;
-    (filter {'ON' if EMA_BIAS_FILTER else 'OFF'}, warm-up {EMA_WARMUP} candle). Level searah baru menggantikan yang lama; tanpa expired.
-    <br>• <b>Konfirmasi M5 (IFVG)</b>: setelah level disentuh, FVG M5 searah harus 'mengambil' gap FVG M5 tidak searah (boleh terbentuk sampai {IFVG_LOOKBACK} candle
-    sebelum sentuh). Entry <b>limit</b> di tepi atas overlap (Short: bawah); IFVG baru sebelum fill memindahkan limit.
-    <b>SL</b> = kedalaman terjauh sejak sentuh s/d FVG searah selesai (tanpa buffer).
-    <br>• <b>Exit</b>: tanpa trailing. <b>TARGET</b> = ujung wick level lawan (H1+FVG, tanpa EMA) terbaru yang belum tersentuh dan lebih jauh dari entry;
-    berubah dinamis. SL dicek duluan dalam candle yang sama; TP tidak dicek di candle fill.
+    <br>• <b>Sentuh EMA{BIAS_EMA_FAST}</b> (level awal saja): {_ematouch_html()}.
+    <br>• <b>Level vs EMA{BIAS_EMA_SLOW}</b> (level awal saja): {_levelema_html()}.
+    <br>• <b>Validasi swing</b>: {_swing_html()}
+    <br>• <b>Slope EMA{BIAS_EMA_SLOW} saat sentuh</b>: {_slope_html()}
+    <br>• <b>Inducement (IDM)</b>: {_idm_html()}
+    <br>• <b>Bias EMA{BIAS_EMA_FAST}/{BIAS_EMA_SLOW}</b> (level awal saja, dihitung {'SAAT LEVEL TERSENTUH — EMA cross sejak level terbentuk ikut menentukan' if BIAS_AT == 'touch' else 'saat level aktif'}): Long hanya kalau EMA{BIAS_EMA_FAST} &gt; EMA{BIAS_EMA_SLOW}, Short kalau &lt;
+    (filter {'ON' if EMA_BIAS_FILTER else 'OFF'}, warm-up {EMA_WARMUP} candle). {'Semua level disimpan; level yang belum tersentuh tetap aktif walau level searah baru terbentuk' if LEVEL_MODE == 'keep' else 'Level searah baru menggantikan yang lama'}; tanpa expired.
+    <br>• <b>Konfirmasi M5 ({ENTRY_MODE})</b>: {_confirm_html()}
+    <br>• <b>Exit</b>: tanpa trailing. {_tp_html()}
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}.
     Level terdeteksi: {cr.get('levels_count',0)}. Aktif (lolos FVG/filter): {cr.get('aktif_count',0)}. Limit terfill: {cr.get('filled_count',0)}.
     Gugur — tanpa FVG: {cr.get('tanpa_fvg_count',0)}, disentuh sebelum FVG: {cr.get('disentuh_count',0)}, level berulang: {cr.get('ulang_count',0)},
-    warm-up: {cr.get('warmup_count',0)}, filter EMA: {cr.get('ema_count',0)}; M5 — tanpa sentuh: {cr.get('no_touch_count',0)},
-    tanpa IFVG: {cr.get('no_ifvg_count',0)}, limit tak terfill: {cr.get('no_fill_count',0)}, SL tidak valid: {cr.get('sl_invalid_count',0)}.
+    warm-up: {cr.get('warmup_count',0)}, filter EMA: {cr.get('ema_count',0)}, bias saat sentuh: {cr.get('bias_touch_count',0)} (pulih oleh cross: {cr.get('bias_pulih_count',0)}), tak sentuh EMA{BIAS_EMA_FAST}: {cr.get('ema_touch_count',0)}, level vs EMA{BIAS_EMA_SLOW}: {cr.get('ema_level_count',0)}; M5 — tanpa sentuh: {cr.get('no_touch_count',0)},
+    tanpa IFVG: {cr.get('no_ifvg_count',0)}, limit tak terfill: {cr.get('no_fill_count',0)}, SL tidak valid: {cr.get('sl_invalid_count',0)}, TP tidak valid: {cr.get('tp_invalid_count',0)}, RR di bawah minimum: {cr.get('rr_kurang_count',0)}, TP diperbesar: {cr.get('rr_diperbesar_count',0)}.
+    Validasi swing — tak di-break: {cr.get('swing_not_broken_count',0)}, hanya sweep: {cr.get('swing_sweep_count',0)}, tanpa swing: {cr.get('swing_no_pivot_count',0)}; tanpa IDM: {cr.get('idm_none_count',0)}; slope EMA{BIAS_EMA_SLOW} menentang: {cr.get('slope_count',0)}.
     Sinyal terblokir saat entry — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
     min order: {cr.get('blocked_by_min_order',0)}, posisi searah masih aktif: {cr.get('blocked_by_dup',0)}.
     <br>Unduh semua trade: <a href="/trades.csv">/trades.csv</a> &nbsp;|&nbsp;
@@ -1134,7 +1696,7 @@ def _fmt_wib_short(ts_ms):
 
 
 def _fmt_price(x):
-    return f"{float(x):.10g}"
+    return "" if x is None else f"{float(x):.10g}"
 
 
 def _hasil_str(t):
@@ -1144,13 +1706,13 @@ def _hasil_str(t):
     return f"SL {t['r_mult']:+.1f}R"
 
 
-CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Touch', 'IFVG selesai', 'Limit IFVG', 'Fill', 'SL',
+CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Touch', 'Setup selesai', 'Limit', 'Fill', 'SL', 'TP',
                'Fill time', 'Exit', 'Exit time']
 
 
 def _trades_csv() -> bytes:
     """trades.csv ringkas, waktu WIB (UTC+7). Terbentuk = open candle H1 c1; Touch = candle M5 pertama menyentuh level;
-    IFVG selesai = candle M5 x3 (FVG searah selesai); Limit IFVG = harga limit; Fill = harga fill; Exit = harga exit."""
+    Setup selesai = candle M5 penutup setup (m5res: candle break; m5sr/ifvg: FVG searah selesai); Limit = harga limit; Fill = harga fill; Exit = harga exit."""
     with _lock:
         trades_cp = list(_all_trades)
     buf = io.StringIO()
@@ -1161,7 +1723,7 @@ def _trades_csv() -> bytes:
         writer.writerow([
             t['symbol'], t['direction'].upper(), _hasil_str(t), _fmt_price(t['level']),
             _fmt_wib_short(t['level_formed_ts']), _fmt_wib_short(t['test1_ts']), _fmt_wib_short(t['test2_ts']),
-            _fmt_price(mt.get('ifvg_entry', t['entry'])), _fmt_price(t['entry']), _fmt_price(t['sl']),
+            _fmt_price(mt.get('ifvg_entry', t['entry'])), _fmt_price(t['entry']), _fmt_price(t['sl']), _fmt_price(t['tp']),
             _fmt_wib_short(t['entry_ts']), _fmt_price(t['exit']), _fmt_wib_short(t['exit_ts']),
         ])
     return buf.getvalue().encode('utf-8')
