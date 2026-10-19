@@ -1,23 +1,21 @@
 """
-backtest_cross.py — Backtest EMA8/EMA21 cross, M5 saja, stop-and-reverse (selalu ada posisi)
-=============================================================================================
-STRATEGI
-- Timeframe M5 saja. EMA8 (cepat) dan EMA21 (lambat) dari close.
-- Golden cross (EMA8 naik menembus EMA21) saat candle closed -> tutup short (kalau ada) lalu LONG di open candle berikutnya.
-- Death cross (EMA8 turun menembus EMA21) saat candle closed -> tutup long (kalau ada) lalu SHORT di open candle berikutnya.
-- Tanpa SL, tanpa TP. Satu-satunya exit = cross berlawanan (atau LIKUIDASI, lihat bawah).
-- Ukuran posisi: karena tidak ada SL, ukuran = MARGIN per posisi = RISK_PCT x balance (default 5%, compound, balance realized).
-  Leverage 10x -> nilai posisi (notional) = margin x 10 = 50% dari balance (= $5 pada modal $10, pas minimum order Bybit).
-  Kalau notional < MIN_ORDER_USD ($5) -> dinaikkan ke $5 (margin $0.5), jadi saat balance < $10 porsi margin > 5%.
-- Likuidasi (isolated margin): kalau harga bergerak melawan >= (1/LEVERAGE - LIQ_MMR) dari entry (default ~9.5% utk 10x),
-  posisi dilikuidasi dan margin hilang. Ini satu-satunya "pengaman" karena tidak ada SL.
-- Fee: FEE_ENTRY_PCT 0.1% & FEE_EXIT_PCT 0.3% dari nilai posisi (sama seperti bot lama). Tanpa slippage.
-- Posisi yang masih terbuka di akhir data tidak dihitung.
-- Semua koin berbagi 1 balance. Satu posisi per koin. Kalau margin terpakai melebihi MARGIN_USAGE_CAP x balance, sinyal dilewati.
-
-Deploy Railway: Start command -> python backtest_cross.py ; buka domain untuk lihat progress & hasil. /trades.csv untuk unduh trade.
-Env: INITIAL_BALANCE, RISK_PCT, LEVERAGE, EMA_FAST, EMA_SLOW, EMA_WARMUP, FEE_ENTRY_PCT, FEE_EXIT_PCT, LIQ_MMR, MARGIN_USAGE_CAP,
-BACKTEST_START_DATE, BACKTEST_END_DATE (default 1 tahun terakhir), SYMBOLS (pisah koma, opsional).
+backtest_cross.py — Backtest EMA8/EMA21 cross, M5 saja, stop-and-reverse
+=========================================================================
+- M5 saja. EMA8 (cepat) & EMA21 (lambat) dari close.
+- Golden cross -> LONG, death cross -> SHORT (tutup posisi lawan lalu balik arah). Tanpa SL, tanpa TP.
+- FILTER ENTRY (ENTRY_CLEAR_N=3, 0 = nonaktif): N candle SEBELUM candle cross dan N candle SETELAH candle cross tidak boleh
+  menyentuh EMA8 maupun EMA21 (low <= EMA <= high, salah satu EMA cukup). Candle cross sendiri tidak dihitung.
+  Karena menunggu N candle setelah cross, entry di open candle ke-(N+1) setelah cross (tanpa lookahead). Filter HANYA untuk entry.
+- EXIT tidak difilter: posisi selalu ditutup di open candle setelah cross berlawanan. Kalau cross itu gagal filter,
+  bot flat sampai ada cross berikutnya yang lolos.
+- Ukuran posisi: MARGIN = RISK_PCT x balance (5%), leverage 10x -> notional 50% balance ($5 pada modal $10 = minimum order Bybit).
+  Kalau notional < MIN_ORDER_USD -> dinaikkan ke minimum.
+- Likuidasi (isolated): harga melawan >= (1/LEVERAGE - LIQ_MMR) dari entry -> margin hilang.
+- Fee: 0.1% masuk, 0.3% keluar dari nilai posisi. Posisi terbuka di akhir data tidak dihitung.
+- Dua simulasi: GABUNGAN (1 balance bersama) dan PER-KOIN independen (tiap koin modal awal sendiri).
+Env: INITIAL_BALANCE, RISK_PCT, LEVERAGE, MIN_ORDER_USD, ENTRY_CLEAR_N, EMA_FAST, EMA_SLOW, EMA_WARMUP, FEE_ENTRY_PCT, FEE_EXIT_PCT,
+LIQ_MMR, MARGIN_USAGE_CAP, BACKTEST_START_DATE, BACKTEST_END_DATE, SYMBOLS (pisah koma).
+Start command Railway: python backtest_cross.py
 """
 import os, threading, time, io, csv
 from datetime import datetime, timezone, timedelta
@@ -33,16 +31,17 @@ from pybit.unified_trading import HTTP
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))         # margin per posisi = 5% balance (10x -> notional 50% balance = $5 pada modal $10)
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))
 LEVERAGE         = float(os.environ.get('LEVERAGE', '10'))
-MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))     # minimum nilai order (notional) Bybit; kalau hitungan lebih kecil -> dinaikkan ke ini
+MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))
+ENTRY_CLEAR_N    = int(os.environ.get('ENTRY_CLEAR_N', 3))           # filter entry: N candle sebelum & sesudah cross tidak boleh sentuh EMA (0 = off)
 EMA_FAST         = int(os.environ.get('EMA_FAST', 8))
 EMA_SLOW         = int(os.environ.get('EMA_SLOW', 21))
-EMA_WARMUP       = int(os.environ.get('EMA_WARMUP', 100))            # candle awal dibuang agar EMA stabil
+EMA_WARMUP       = int(os.environ.get('EMA_WARMUP', 100))
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
-LIQ_MMR          = float(os.environ.get('LIQ_MMR', '0.005'))         # maintenance margin kasar
-LIQ_PCT          = max(0.0, 1.0 / LEVERAGE - LIQ_MMR)                # gerak melawan yg memicu likuidasi
+LIQ_MMR          = float(os.environ.get('LIQ_MMR', '0.005'))
+LIQ_PCT          = max(0.0, 1.0 / LEVERAGE - LIQ_MMR)
 MARGIN_USAGE_CAP = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
 
 def _default_end_date():
@@ -87,7 +86,8 @@ _log = []
 _phase = 'running'
 _trades_all = []
 _summary = {}
-_per_coin = []
+_per_coin = []          # kontribusi per koin (simulasi gabungan)
+_per_coin_indep = []    # simulasi per-koin independen
 _monthly = []
 
 
@@ -160,31 +160,47 @@ def fetch_m5(symbol):
 
 
 # ============================================================
-# SINYAL: segmen posisi per koin (stop-and-reverse)
+# SINYAL: segmen posisi per koin (stop-and-reverse + filter entry)
 # ============================================================
 def build_segments(symbol, df):
-    """Return list segmen: dict(symbol, dir(+1/-1), e_ts, e_px, x_ts, x_px, reason).
-    reason: 'cross' (ditutup cross berlawanan) | 'liq' (likuidasi). Segmen yg masih terbuka di akhir data dibuang."""
+    """Return (segs, stats). segs = list dict(symbol, dir(+1/-1), e_ts, e_px, x_ts, x_px, reason); reason: 'cross' | 'liq'.
+    stats = {'cross': total cross, 'valid': lolos filter & selesai, 'filtered': gagal filter}."""
     o = df['open'].values.astype(float); h = df['high'].values.astype(float)
     l = df['low'].values.astype(float);  c = df['close'].values.astype(float)
     ts = df['ts'].values.astype(np.int64)
     n = len(c)
+    stats = {'cross': 0, 'valid': 0, 'filtered': 0}
     if n < EMA_WARMUP + 5:
-        return []
+        return [], stats
     cs = pd.Series(c)
     ef = cs.ewm(span=EMA_FAST, adjust=False).mean().values
     es = cs.ewm(span=EMA_SLOW, adjust=False).mean().values
     up = ef > es
     gc = np.flatnonzero(up[1:] & ~up[:-1]) + 1          # golden cross: candle i closed
     dc = np.flatnonzero(~up[1:] & up[:-1]) + 1          # death cross
-    ev = sorted([(int(i), 1) for i in gc if i >= EMA_WARMUP] + [(int(i), -1) for i in dc if i >= EMA_WARMUP])
-    # entry di open candle setelah cross
-    ev = [(i + 1, d) for i, d in ev if i + 1 < n]
+    crosses = sorted([(int(i), 1) for i in gc if i >= EMA_WARMUP] + [(int(i), -1) for i in dc if i >= EMA_WARMUP])
+    stats['cross'] = len(crosses)
+    N = ENTRY_CLEAR_N
+    if N > 0:
+        touch = ((l <= ef) & (ef <= h)) | ((l <= es) & (es <= h))      # candle menyentuh EMA8 atau EMA21
+        pc = np.concatenate([[0], np.cumsum(touch.astype(np.int64))])
+        cnt = lambda a, b: int(pc[b + 1] - pc[a])                       # jumlah candle menyentuh di indeks a..b (inklusif)
     segs = []
-    for k, (e, d) in enumerate(ev):
-        if k + 1 >= len(ev):
+    for k, (ci, d) in enumerate(crosses):
+        if k + 1 >= len(crosses):
             break                                        # posisi terakhir belum selesai -> tidak dihitung
-        x = ev[k + 1][0]                                 # exit di open candle entry berikutnya
+        nxt = crosses[k + 1][0]
+        x = nxt + 1                                      # exit selalu di open candle setelah cross berikutnya (tanpa filter)
+        if N > 0:
+            e = ci + N + 1                               # tunggu N candle setelah cross, entry di open berikutnya
+            if ci - N < 0 or e >= n or nxt <= ci + N or cnt(ci - N, ci - 1) > 0 or cnt(ci + 1, ci + N) > 0:
+                stats['filtered'] += 1
+                continue
+        else:
+            e = ci + 1
+        if e >= n or x >= n:
+            continue
+        stats['valid'] += 1
         e_px = o[e]
         liq_idx = None
         if LIQ_PCT > 0:
@@ -200,11 +216,11 @@ def build_segments(symbol, df):
             x_ts = int(ts[x]); x_px = float(o[x]); reason = 'cross'
         segs.append({'symbol': symbol, 'dir': d, 'e_ts': int(ts[e]), 'e_px': float(e_px),
                      'x_ts': x_ts, 'x_px': float(x_px), 'reason': reason})
-    return segs
+    return segs, stats
 
 
 # ============================================================
-# SIMULASI GABUNGAN (1 balance)
+# SIMULASI (dipakai utk gabungan dan per-koin)
 # ============================================================
 def simulate(all_segs):
     events = []
@@ -226,7 +242,7 @@ def simulate(all_segs):
                 blocked += 1
                 continue
             margin = balance * RISK_PCT
-            if margin * LEVERAGE < MIN_ORDER_USD:                # di bawah minimum order Bybit -> naikkan ke minimum
+            if margin * LEVERAGE < MIN_ORDER_USD:        # di bawah minimum order Bybit -> naikkan ke minimum
                 margin = MIN_ORDER_USD / LEVERAGE
             if used + margin > balance * MARGIN_USAGE_CAP:
                 blocked += 1
@@ -300,11 +316,13 @@ def monthly_breakdown(trades):
 # WORKER
 # ============================================================
 def _run():
-    global _phase, _summary, _per_coin, _monthly
+    global _phase, _summary, _per_coin, _per_coin_indep, _monthly
     try:
         _log_msg(f"🚀 Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} cross M5 (stop-and-reverse, tanpa SL/TP) — {len(SYMBOLS)} koin, "
-                 f"{BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}; margin {RISK_PCT*100:g}%/posisi, leverage {LEVERAGE:g}x, likuidasi ±{LIQ_PCT*100:.1f}%")
+                 f"{BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}; margin {RISK_PCT*100:g}%/posisi, leverage {LEVERAGE:g}x, "
+                 f"likuidasi ±{LIQ_PCT*100:.1f}%, filter entry {ENTRY_CLEAR_N} candle sebelum/sesudah cross")
         all_segs = []
+        segs_by = {}
         for symbol in SYMBOLS:
             _log_msg(f"📊 {symbol}: fetch M5...")
             df = fetch_m5(symbol)
@@ -312,16 +330,28 @@ def _run():
                 _log_msg(f"   ⚠ {symbol}: data kosong, skip.")
                 continue
             df = df.sort_values('ts').reset_index(drop=True)
-            segs = build_segments(symbol, df)
+            segs, st = build_segments(symbol, df)
+            segs_by[symbol] = segs
             all_segs.extend(segs)
-            _log_msg(f"   ✅ {symbol}: {len(df):,} candle, {len(segs)} posisi selesai ({sum(1 for s in segs if s['reason']=='liq')} likuidasi)")
+            _log_msg(f"   ✅ {symbol}: {len(df):,} candle, {st['cross']} cross, {st['filtered']} gagal filter, "
+                     f"{len(segs)} posisi selesai ({sum(1 for s in segs if s['reason']=='liq')} likuidasi)")
         _log_msg(f"🧮 Simulasi gabungan ({len(all_segs)} posisi)...")
         trades, summ = simulate(all_segs)
         monthly, avg_g = monthly_breakdown(trades)
+
+        _log_msg(f"🧮 Simulasi PER-KOIN independen ({len(segs_by)} koin, modal ${INITIAL_BALANCE:g} masing-masing)...")
+        indep = []
+        for sym, sg in segs_by.items():
+            _, sm = simulate(sg)
+            indep.append({'symbol': sym, 'n': sm['n_trades'], 'wr': sm['wr'], 'liq': sm['n_liq'],
+                          'final': sm['final_balance'], 'roi': sm['roi'], 'max_dd': sm['max_dd'], 'blocked': sm['blocked']})
+        indep.sort(key=lambda r: -r['roi'])
+
         with _lock:
             _trades_all[:] = sorted(trades, key=lambda t: t['x_ts'])
             _summary = {**summ, 'avg_growth': avg_g}
             _per_coin = per_coin_breakdown(trades)
+            _per_coin_indep = indep
             _monthly = monthly
             _phase = 'done'
         _log_msg(f"✅ SELESAI. {summ['n_trades']} trade, WR {summ['wr']:.1f}%, likuidasi {summ['n_liq']}, "
@@ -342,6 +372,7 @@ def _render_html():
         phase = _phase
         s = dict(_summary)
         coins = list(_per_coin)
+        indep = list(_per_coin_indep)
         months = list(_monthly)
         log_html = '\n'.join(_log[-300:])
     status = {'running': '<div class="status running">⏳ Sedang berjalan...</div>',
@@ -361,10 +392,15 @@ def _render_html():
   </div>'''
     coin_rows = ''.join(f'<tr><td>{r["symbol"]}</td><td>{r["n"]}</td><td>{r["wr"]:.1f}%</td><td>{r["liq"]}</td>'
                         f'<td class="{cls(r["pnl"])}">${r["pnl"]:+.2f}</td></tr>' for r in coins)
+    indep_rows = ''.join(f'<tr><td>{r["symbol"]}</td><td>{r["n"]}</td><td>{r["wr"]:.1f}%</td><td>{r["liq"]}</td>'
+                         f'<td>${r["final"]:.2f}</td><td class="{cls(r["roi"])}">{r["roi"]:+.1f}%</td>'
+                         f'<td class="neg">{r["max_dd"]:.1f}%</td><td>{r["blocked"]}</td></tr>' for r in indep)
     month_rows = ''.join(f'<tr><td>{r["month"]}</td><td>{r["n"]}</td><td>{r["wr"]:.1f}%</td><td>${r["start"]:.2f}</td>'
                          f'<td>${r["end"]:.2f}</td><td class="{cls(r["profit"])}">${r["profit"]:+.2f}</td>'
                          f'<td class="{cls(r["growth"])}">{r["growth"]:+.1f}%</td></tr>' for r in months)
     avg_g = g('avg_growth', 0.0)
+    filt = (f'Filter entry: {ENTRY_CLEAR_N} candle sebelum &amp; {ENTRY_CLEAR_N} candle sesudah cross tidak boleh menyentuh EMA{EMA_FAST}/EMA{EMA_SLOW} '
+            f'(entry di open candle ke-{ENTRY_CLEAR_N + 1} setelah cross; exit tetap hanya cross).') if ENTRY_CLEAR_N > 0 else 'Filter entry: OFF.'
     return f'''<!DOCTYPE html>
 <html lang="id"><head><meta charset="utf-8"><meta http-equiv="refresh" content="10"><title>Backtest EMA Cross</title>
 <style>
@@ -387,16 +423,19 @@ def _render_html():
 {status}
 {cards}
 <div class="note">
- Golden cross → Long, death cross → tutup &amp; Short (dan sebaliknya). Tanpa SL/TP. Margin {RISK_PCT*100:g}% balance per posisi, leverage {LEVERAGE:g}x
- (likuidasi bila harga melawan ±{LIQ_PCT*100:.1f}%). Fee {FEE_ENTRY_PCT*100:.3f}% masuk / {FEE_EXIT_PCT*100:.3f}% keluar. Modal awal ${INITIAL_BALANCE:g}.
- Sinyal terlewat (margin penuh): {g('blocked')}.<br>
+ Golden cross → Long, death cross → tutup &amp; Short (dan sebaliknya). Tanpa SL/TP. {filt}<br>
+ Margin {RISK_PCT*100:g}% balance per posisi (min order ${MIN_ORDER_USD:g}), leverage {LEVERAGE:g}x
+ (likuidasi bila harga melawan ±{LIQ_PCT*100:.1f}%). Fee {FEE_ENTRY_PCT*100:.2f}% masuk / {FEE_EXIT_PCT*100:.2f}% keluar. Modal awal ${INITIAL_BALANCE:g}.
+ Sinyal terlewat (margin penuh, simulasi gabungan): {g('blocked')}.<br>
  <a href="/trades.csv">/trades.csv</a> | <a href="/logs">/logs</a>
 </div>
-<h2>Per Bulan</h2>
+<h2>Per Bulan (simulasi gabungan)</h2>
 <div class="note">Rata-rata pertumbuhan: <b class="{cls(avg_g)}">{avg_g:+.1f}% / bulan</b></div>
 <table><tr><th>Bulan</th><th>Trade</th><th>WR%</th><th>Balance Awal</th><th>Balance Akhir</th><th>Profit</th><th>Pertumbuhan</th></tr>{month_rows}</table>
-<h2>Per Koin</h2>
+<h2>Kontribusi per Koin (simulasi gabungan, 1 balance bersama)</h2>
 <table><tr><th>Symbol</th><th>Trade</th><th>WR%</th><th>Likuidasi</th><th>Total PnL</th></tr>{coin_rows}</table>
+<h2>Simulasi Per-Koin (independen, modal awal ${INITIAL_BALANCE:g} sendiri-sendiri)</h2>
+<table><tr><th>Symbol</th><th>Trade</th><th>WR%</th><th>Likuidasi</th><th>Balance Akhir</th><th>ROI</th><th>Max DD</th><th>Terlewat</th></tr>{indep_rows}</table>
 <h2>Log</h2><div class="log" id="log">{log_html}</div>
 <script>var e=document.getElementById('log');if(e)e.scrollTop=e.scrollHeight;</script>
 </body></html>'''.encode('utf-8')
