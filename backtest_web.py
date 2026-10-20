@@ -1,6 +1,6 @@
 """
-backtest_cross.py — Backtest EMA21/EMA30 cross H1 + level berFVG + SL di wick c1/c2, stop-and-reverse
-====================================================================================================
+backtest_cross.py � Backtest EMA21/EMA30 cross H1 + level berFVG + SL di wick c1/c2 (+buffer), stop-and-reverse
+===============================================================================================================
 - Timeframe H1 saja. EMA21 (cepat) & EMA30 (lambat) dari close.
 - Golden cross -> LONG, death cross -> SHORT (tutup posisi lawan lalu balik arah). Tanpa TP.
 - LEVEL berFVG:
@@ -14,9 +14,9 @@ backtest_cross.py — Backtest EMA21/EMA30 cross H1 + level berFVG + SL di wick 
     b) FVG belum selesai -> tunggu FVG selesai, entry market di open candle setelah candle k (boleh jauh dari titik cross),
        asal sebelum cross berlawanan.
     c) tidak ada level di jendela, atau cross berlawanan muncul duluan -> sinyal gugur.
-- SL: Long = wick terbawah antara c1 dan c2 level; Short = wick teratas antara c1 dan c2 level. Tidak ada TP.
-  SL tidak valid (entry sudah di sisi rugi dari SL) -> setup dibuang.
-- EXIT: SL kena | cross berlawanan (open candle setelah cross; cross itu tidak difilter) | likuidasi — mana yang duluan.
+- SL: Long = wick terbawah antara c1 dan c2 level dikurangi SL_BUFFER_PCT (1%); Short = wick teratas antara c1 dan c2 level
+  ditambah SL_BUFFER_PCT (1%). Tidak ada TP. SL tidak valid (entry sudah di sisi rugi dari SL) -> setup dibuang.
+- EXIT: SL kena | cross berlawanan (open candle setelah cross; cross itu tidak difilter) | likuidasi � mana yang duluan.
   Gap: kalau open candle sudah melewati SL, exit di open. Cross tanpa level -> bot flat sampai ada cross berikutnya yang lolos.
 - UKURAN POSISI: RISK per TRADE = RISK_PCT x balance (5%) -> qty = risk / |entry - SL|. Margin = notional / LEVERAGE (10x).
   Notional < MIN_ORDER_USD ($5): kalau >= ORDER_BUMP_FLOOR ($4) dinaikkan ke $5 (risk sedikit > 5%), kalau lebih kecil setup dilewati.
@@ -24,9 +24,9 @@ backtest_cross.py — Backtest EMA21/EMA30 cross H1 + level berFVG + SL di wick 
 - Likuidasi (isolated): harga melawan >= (1/LEVERAGE - LIQ_MMR) dari entry -> margin hilang (kalau SL lebih jauh dari likuidasi).
 - Fee: 0.1% masuk, 0.3% keluar dari nilai posisi. Posisi terbuka di akhir data tidak dihitung.
 - Dua simulasi: GABUNGAN (1 balance bersama) dan PER-KOIN independen (tiap koin modal awal sendiri).
-Env: INITIAL_BALANCE, RISK_PCT, LEVERAGE, MIN_ORDER_USD, ORDER_BUMP_FLOOR, LEVEL_BEFORE, LEVEL_AFTER, FVG_FIRST_C, FVG_LAST_C,
-EMA_FAST, EMA_SLOW, EMA_WARMUP, FEE_ENTRY_PCT, FEE_EXIT_PCT, LIQ_MMR, MARGIN_USAGE_CAP, BACKTEST_START_DATE, BACKTEST_END_DATE,
-SYMBOLS (pisah koma).
+Env: INITIAL_BALANCE, RISK_PCT, LEVERAGE, MIN_ORDER_USD, ORDER_BUMP_FLOOR, SL_BUFFER_PCT, LEVEL_BEFORE, LEVEL_AFTER, FVG_FIRST_C,
+FVG_LAST_C, EMA_FAST, EMA_SLOW, EMA_WARMUP, FEE_ENTRY_PCT, FEE_EXIT_PCT, LIQ_MMR, MARGIN_USAGE_CAP, BACKTEST_START_DATE,
+BACKTEST_END_DATE, SYMBOLS (pisah koma).
 Start command Railway: python backtest_cross.py
 """
 import os, threading, time, io, csv, traceback
@@ -43,10 +43,11 @@ from pybit.unified_trading import HTTP
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))         # risk PER TRADE dari balance (jarak entry-SL)
-LEVERAGE         = float(os.environ.get('LEVERAGE', '15'))
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))         # risk PER TRADE dari balance (jarak entry-SL)
+LEVERAGE         = float(os.environ.get('LEVERAGE', '10'))
 MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))
 ORDER_BUMP_FLOOR = float(os.environ.get('ORDER_BUMP_FLOOR', '4.0'))  # notional antara floor..min order dinaikkan ke min order; di bawah floor dilewati
+SL_BUFFER_PCT    = float(os.environ.get('SL_BUFFER_PCT', '0.01'))    # SL digeser 1% lebih jauh dari ujung wick c1/c2 (pengaman)
 LEVEL_BEFORE     = int(os.environ.get('LEVEL_BEFORE', 5))            # c1 level maks di candle ke-N ke belakang (candle cross = ke-1)
 LEVEL_AFTER      = int(os.environ.get('LEVEL_AFTER', 10))            # c1 level boleh sampai N candle setelah cross
 FVG_FIRST_C      = int(os.environ.get('FVG_FIRST_C', 1))             # 1 -> FVG bisa C1-C3 atau C2-C4 ; 2 -> hanya C2-C4
@@ -135,10 +136,10 @@ def fetch_h1(symbol):
         try:
             df = pd.read_csv(path)
             if not df.empty and {'ts', 'open', 'high', 'low', 'close'}.issubset(df.columns):
-                _log_msg(f"   💾 {symbol}: pakai cache ({len(df):,} candle H1)")
+                _log_msg(f"    {symbol}: pakai cache ({len(df):,} candle H1)")
                 return df
         except Exception as e:
-            _log_msg(f"   ⚠ {symbol}: cache korup ({e}), fetch ulang.")
+            _log_msg(f"    {symbol}: cache korup ({e}), fetch ulang.")
     session = HTTP(testnet=False)
     rows, cur_end = [], _END_MS
     while True:
@@ -151,10 +152,10 @@ def fetch_h1(symbol):
                 break
             except Exception as e:
                 wait = 2 ** attempt
-                _log_msg(f"   ⚠ {symbol} API error (percobaan {attempt+1}): {e} — retry {wait}s")
+                _log_msg(f"    {symbol} API error (percobaan {attempt+1}): {e} � retry {wait}s")
                 time.sleep(wait)
         if data is None:
-            _log_msg(f"   ❌ {symbol}: gagal fetch setelah 4 percobaan.")
+            _log_msg(f"    {symbol}: gagal fetch setelah 4 percobaan.")
             break
         if not data:
             break
@@ -172,7 +173,7 @@ def fetch_h1(symbol):
     try:
         df.to_csv(path, index=False)
     except Exception as e:
-        _log_msg(f"   ⚠ {symbol}: gagal simpan cache — {e}")
+        _log_msg(f"    {symbol}: gagal simpan cache � {e}")
     return df
 
 
@@ -215,7 +216,7 @@ def build_segments(symbol, df):
     """Return (segs, stats). segs = list dict(symbol, dir(+1/-1), e_ts, e_px, sl, x_ts, x_px, reason); reason: 'sl' | 'cross' | 'liq'.
     Filter entry: c1 level searah berFVG di ci-(LEVEL_BEFORE-1) .. ci+LEVEL_AFTER (candle cross = candle ke-1).
     FVG sudah selesai saat cross (k <= ci) -> entry market di open ci+1. Belum -> tunggu FVG selesai, entry di open k+1,
-    asal sebelum cross berlawanan. SL = wick terjauh c1/c2 level yang dipakai."""
+    asal sebelum cross berlawanan. SL = wick terjauh c1/c2 level yang dipakai, digeser SL_BUFFER_PCT lebih jauh."""
     o = df['open'].values.astype(float); h = df['high'].values.astype(float)
     l = df['low'].values.astype(float);  c = df['close'].values.astype(float)
     ts = df['ts'].values.astype(np.int64)
@@ -257,7 +258,10 @@ def build_segments(symbol, df):
         if e >= n or x >= n or e >= x:
             continue
         c1 = int(c1s[sel])
-        sl = float(min(l[c1], l[c1 + 1])) if d == 1 else float(max(h[c1], h[c1 + 1]))   # ujung wick c1/c2 paling jauh
+        if d == 1:
+            sl = float(min(l[c1], l[c1 + 1])) * (1 - SL_BUFFER_PCT)     # wick bawah c1/c2 dikurangi buffer
+        else:
+            sl = float(max(h[c1], h[c1 + 1])) * (1 + SL_BUFFER_PCT)     # wick atas c1/c2 ditambah buffer
         e_px = float(o[e])
         if (d == 1 and e_px <= sl) or (d == -1 and e_px >= sl):
             stats['sl_invalid'] += 1                     # harga entry sudah di sisi rugi dari SL
@@ -408,16 +412,16 @@ def monthly_breakdown(trades):
 def _run():
     global _phase, _summary, _per_coin, _per_coin_indep, _monthly
     try:
-        _log_msg(f"🚀 Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} cross H1 + level berFVG + SL wick c1/c2 — {len(SYMBOLS)} koin, "
+        _log_msg(f" Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} cross H1 + level berFVG + SL wick c1/c2 (+{SL_BUFFER_PCT*100:g}%) � {len(SYMBOLS)} koin, "
                  f"{BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}; risk {RISK_PCT*100:g}%/trade, leverage {LEVERAGE:g}x, "
-                 f"likuidasi ±{LIQ_PCT*100:.1f}%, c1 level {LEVEL_BEFORE} candle sebelum cross s/d {LEVEL_AFTER} candle setelah cross")
+                 f"likuidasi �{LIQ_PCT*100:.1f}%, c1 level {LEVEL_BEFORE} candle sebelum cross s/d {LEVEL_AFTER} candle setelah cross")
         all_segs = []
         segs_by = {}
         for symbol in SYMBOLS:
-            _log_msg(f"📊 {symbol}: fetch H1...")
+            _log_msg(f" {symbol}: fetch H1...")
             df = fetch_h1(symbol)
             if df.empty:
-                _log_msg(f"   ⚠ {symbol}: data kosong, skip.")
+                _log_msg(f"    {symbol}: data kosong, skip.")
                 continue
             df = df.sort_values('ts').reset_index(drop=True)
             segs, st = build_segments(symbol, df)
@@ -425,14 +429,14 @@ def _run():
             all_segs.extend(segs)
             n_sl = sum(1 for s in segs if s['reason'] == 'sl')
             n_liq = sum(1 for s in segs if s['reason'] == 'liq')
-            _log_msg(f"   ✅ {symbol}: {len(df):,} candle, {st['cross']} cross, {st['filtered']} gugur (tanpa level), "
+            _log_msg(f"    {symbol}: {len(df):,} candle, {st['cross']} cross, {st['filtered']} gugur (tanpa level), "
                      f"{st['sl_invalid']} SL tidak valid, {st['langsung']} entry langsung + {st['tunggu']} entry setelah menunggu; "
                      f"{len(segs)} posisi selesai ({n_sl} SL, {n_liq} likuidasi)")
-        _log_msg(f"🧮 Simulasi gabungan ({len(all_segs)} posisi)...")
+        _log_msg(f" Simulasi gabungan ({len(all_segs)} posisi)...")
         trades, summ = simulate(all_segs)
         monthly, avg_g = monthly_breakdown(trades)
 
-        _log_msg(f"🧮 Simulasi PER-KOIN independen ({len(segs_by)} koin, modal ${INITIAL_BALANCE:g} masing-masing)...")
+        _log_msg(f" Simulasi PER-KOIN independen ({len(segs_by)} koin, modal ${INITIAL_BALANCE:g} masing-masing)...")
         indep = []
         for sym, sg in segs_by.items():
             _, sm = simulate(sg)
@@ -448,11 +452,11 @@ def _run():
             _per_coin_indep = indep
             _monthly = monthly
             _phase = 'done'
-        _log_msg(f"✅ SELESAI. {summ['n_trades']} trade, WR {summ['wr']:.1f}%, Total R {summ['total_r']:+.2f}, "
+        _log_msg(f" SELESAI. {summ['n_trades']} trade, WR {summ['wr']:.1f}%, Total R {summ['total_r']:+.2f}, "
                  f"SL {summ['n_sl']} / cross {summ['n_cross']} / likuidasi {summ['n_liq']}, "
                  f"balance akhir ${summ['final_balance']:.2f} (ROI {summ['roi']:+.1f}%), max drawdown {summ['max_dd']:.1f}%")
     except Exception as e:
-        _log_msg(f"❌ ERROR: {e}")
+        _log_msg(f" ERROR: {e}")
         _log_msg(traceback.format_exc())
         with _lock:
             _phase = 'error'
@@ -470,9 +474,9 @@ def _render_html():
         months = list(_monthly)
         log_html = '\n'.join(_log[-300:])
     status_map = {
-        'running': '<div class="status running">⏳ Sedang berjalan...</div>',
-        'error': '<div class="status error">❌ Error — lihat log di bawah.</div>',
-        'done': '<div class="status done">✅ Selesai</div>',
+        'running': '<div class="status running"> Sedang berjalan...</div>',
+        'error': '<div class="status error"> Error � lihat log di bawah.</div>',
+        'done': '<div class="status done"> Selesai</div>',
     }
     status = status_map.get(phase, status_map['done'])
 
@@ -513,7 +517,8 @@ def _render_html():
     filt = (f'Filter entry: c1 level searah berFVG (FVG dari C{FVG_FIRST_C}-C{FVG_LAST_C}) harus berada dalam {LEVEL_BEFORE} candle terakhir '
             f'sebelum cross (candle cross = ke-1) sampai {LEVEL_AFTER} candle setelah cross. FVG sudah selesai saat cross -> entry market saat itu; '
             f'belum -> tunggu FVG selesai lalu entry market; kalau tidak ada, sinyal gugur. '
-            f'SL = ujung wick terjauh c1/c2 level (Long: wick bawah, Short: wick atas). Tanpa TP; exit via SL, cross berlawanan, atau likuidasi.')
+            f'SL = ujung wick terjauh c1/c2 level (Long: wick bawah, Short: wick atas) digeser {SL_BUFFER_PCT*100:g}% lebih jauh. '
+            f'Tanpa TP; exit via SL, cross berlawanan, atau likuidasi.')
 
     css = '''
  body { font-family:-apple-system,Arial,sans-serif; background:#0f1117; color:#e6e6e6; margin:0; padding:20px; }
@@ -534,13 +539,13 @@ def _render_html():
     html = (
         '<!DOCTYPE html><html lang="id"><head><meta charset="utf-8"><meta http-equiv="refresh" content="10">'
         '<title>Backtest EMA Cross H1</title><style>' + css + '</style></head><body>'
-        f'<h1>📊 Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} Cross — H1 + level berFVG + SL</h1>'
+        f'<h1> Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} Cross � H1 + level berFVG + SL</h1>'
         + status + cards +
         '<div class="note">'
-        f'Golden cross → Long, death cross → tutup &amp; Short (dan sebaliknya). {filt}<br>'
-        f'Risk {RISK_PCT*100:g}% balance PER TRADE (jarak entry–SL), leverage {LEVERAGE:g}x, min order ${MIN_ORDER_USD:g} '
-        f'(notional ${ORDER_BUMP_FLOOR:g}–${MIN_ORDER_USD:g} dinaikkan ke minimum, di bawahnya dilewati), '
-        f'likuidasi bila harga melawan ±{LIQ_PCT*100:.1f}%. Fee {FEE_ENTRY_PCT*100:.2f}% masuk / {FEE_EXIT_PCT*100:.2f}% keluar. '
+        f'Golden cross  Long, death cross  tutup &amp; Short (dan sebaliknya). {filt}<br>'
+        f'Risk {RISK_PCT*100:g}% balance PER TRADE (jarak entry�SL), leverage {LEVERAGE:g}x, min order ${MIN_ORDER_USD:g} '
+        f'(notional ${ORDER_BUMP_FLOOR:g}�${MIN_ORDER_USD:g} dinaikkan ke minimum, di bawahnya dilewati), '
+        f'likuidasi bila harga melawan �{LIQ_PCT*100:.1f}%. Fee {FEE_ENTRY_PCT*100:.2f}% masuk / {FEE_EXIT_PCT*100:.2f}% keluar. '
         f'Modal awal ${INITIAL_BALANCE:g}. Setup terlewat (simulasi gabungan): margin {g("blocked_margin")}, di bawah min order {g("blocked_min")}.<br>'
         '<a href="/trades.csv">/trades.csv</a> | <a href="/logs">/logs</a></div>'
         '<h2>Per Bulan (simulasi gabungan)</h2>'
@@ -609,5 +614,5 @@ class _Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     threading.Thread(target=_run, daemon=True).start()
     server = ThreadingHTTPServer(('0.0.0.0', PORT), _Handler)
-    print(f"🌐 Server running on port {PORT}", flush=True)
+    print(f" Server running on port {PORT}", flush=True)
     server.serve_forever()
