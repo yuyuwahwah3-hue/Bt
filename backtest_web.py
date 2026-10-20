@@ -1,28 +1,30 @@
 """
-backtest_cross.py — Backtest EMA21/EMA30 cross H1 + filter LEVEL searah berFVG, stop-and-reverse
-===============================================================================================
+backtest_cross.py — Backtest EMA21/EMA30 cross H1 + level berFVG + SL di wick c1/c2, stop-and-reverse
+====================================================================================================
 - Timeframe H1 saja. EMA21 (cepat) & EMA30 (lambat) dari close.
-- Golden cross -> LONG, death cross -> SHORT (tutup posisi lawan lalu balik arah). Tanpa SL, tanpa TP.
+- Golden cross -> LONG, death cross -> SHORT (tutup posisi lawan lalu balik arah). Tanpa TP.
 - LEVEL berFVG:
     Support (Long): c1 bearish, c2 bullish, level = close c1, c3 tidak menyentuh level (low[c3] > level).
     FVG bullish dari C{FVG_FIRST_C}..C{FVG_LAST_C} (default C1..C4): bisa C1-C3 (a=c1,b=c2,k=c3) atau C2-C4 (a=c2,b=c3,k=c4):
-    low[k] > high[a] dan close[k] > high[b] (close candle ke-3 harus di atas wick/high candle ke-2).
-    FVG di C1-C3 -> level langsung aktif di c3 (tanpa menunggu c4). FVG di C2-C4 -> gugur kalau c4 menyentuh level.
+    low[k] > high[a] dan close[k] > high[b]. FVG di C1-C3 -> level langsung aktif di c3. FVG di C2-C4 -> gugur kalau c4 menyentuh level.
     Resisten (Short) = cermin.
-- FILTER ENTRY (LEVEL_FILTER=1): c1 level searah berFVG harus berada di jendela: LEVEL_BEFORE=5 candle terakhir sebelum cross
+- FILTER ENTRY: c1 level searah berFVG harus berada di jendela: LEVEL_BEFORE=5 candle terakhir sebelum cross
   (candle cross = candle ke-1, jadi c1 maksimal di ci-4) sampai LEVEL_AFTER=10 candle setelah cross.
-    a) FVG level sudah selesai saat cross (k <= ci) -> entry MARKET di open candle ci+1.
+    a) FVG level sudah selesai saat cross (k <= ci) -> entry MARKET di open candle ci+1 (kalau ada >1 level: yang FVG-nya paling baru selesai).
     b) FVG belum selesai -> tunggu FVG selesai, entry market di open candle setelah candle k (boleh jauh dari titik cross),
        asal sebelum cross berlawanan.
     c) tidak ada level di jendela, atau cross berlawanan muncul duluan -> sinyal gugur.
-- EXIT tidak difilter: posisi selalu ditutup di open candle H1 setelah cross berlawanan. Cross tanpa level -> bot flat
-  sampai ada cross berikutnya yang lolos.
-- Ukuran posisi: MARGIN = RISK_PCT x balance (5%), leverage 10x -> notional 50% balance ($5 pada modal $10 = minimum order Bybit).
-  Kalau notional < MIN_ORDER_USD -> dinaikkan ke minimum.
-- Likuidasi (isolated): harga melawan >= (1/LEVERAGE - LIQ_MMR) dari entry (dicek per candle H1) -> margin hilang.
+- SL: Long = wick terbawah antara c1 dan c2 level; Short = wick teratas antara c1 dan c2 level. Tidak ada TP.
+  SL tidak valid (entry sudah di sisi rugi dari SL) -> setup dibuang.
+- EXIT: SL kena | cross berlawanan (open candle setelah cross; cross itu tidak difilter) | likuidasi — mana yang duluan.
+  Gap: kalau open candle sudah melewati SL, exit di open. Cross tanpa level -> bot flat sampai ada cross berikutnya yang lolos.
+- UKURAN POSISI: RISK per TRADE = RISK_PCT x balance (5%) -> qty = risk / |entry - SL|. Margin = notional / LEVERAGE (10x).
+  Notional < MIN_ORDER_USD ($5): kalau >= ORDER_BUMP_FLOOR ($4) dinaikkan ke $5 (risk sedikit > 5%), kalau lebih kecil setup dilewati.
+  Margin terpakai > MARGIN_USAGE_CAP x balance -> setup dilewati.
+- Likuidasi (isolated): harga melawan >= (1/LEVERAGE - LIQ_MMR) dari entry -> margin hilang (kalau SL lebih jauh dari likuidasi).
 - Fee: 0.1% masuk, 0.3% keluar dari nilai posisi. Posisi terbuka di akhir data tidak dihitung.
 - Dua simulasi: GABUNGAN (1 balance bersama) dan PER-KOIN independen (tiap koin modal awal sendiri).
-Env: INITIAL_BALANCE, RISK_PCT, LEVERAGE, MIN_ORDER_USD, LEVEL_FILTER, LEVEL_BEFORE, LEVEL_AFTER, FVG_FIRST_C, FVG_LAST_C,
+Env: INITIAL_BALANCE, RISK_PCT, LEVERAGE, MIN_ORDER_USD, ORDER_BUMP_FLOOR, LEVEL_BEFORE, LEVEL_AFTER, FVG_FIRST_C, FVG_LAST_C,
 EMA_FAST, EMA_SLOW, EMA_WARMUP, FEE_ENTRY_PCT, FEE_EXIT_PCT, LIQ_MMR, MARGIN_USAGE_CAP, BACKTEST_START_DATE, BACKTEST_END_DATE,
 SYMBOLS (pisah koma).
 Start command Railway: python backtest_cross.py
@@ -41,10 +43,10 @@ from pybit.unified_trading import HTTP
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))         # risk PER TRADE dari balance (jarak entry-SL)
 LEVERAGE         = float(os.environ.get('LEVERAGE', '10'))
 MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))
-LEVEL_FILTER     = os.environ.get('LEVEL_FILTER', '1').strip() not in ('0', 'false', 'False', 'off', '')
+ORDER_BUMP_FLOOR = float(os.environ.get('ORDER_BUMP_FLOOR', '4.0'))  # notional antara floor..min order dinaikkan ke min order; di bawah floor dilewati
 LEVEL_BEFORE     = int(os.environ.get('LEVEL_BEFORE', 5))            # c1 level maks di candle ke-N ke belakang (candle cross = ke-1)
 LEVEL_AFTER      = int(os.environ.get('LEVEL_AFTER', 10))            # c1 level boleh sampai N candle setelah cross
 FVG_FIRST_C      = int(os.environ.get('FVG_FIRST_C', 1))             # 1 -> FVG bisa C1-C3 atau C2-C4 ; 2 -> hanya C2-C4
@@ -207,18 +209,18 @@ def level_activations(o, h, l, c, d):
 
 
 # ============================================================
-# SINYAL: segmen posisi per koin (stop-and-reverse + filter level berFVG)
+# SINYAL: segmen posisi per koin (stop-and-reverse + filter level berFVG + SL wick c1/c2)
 # ============================================================
 def build_segments(symbol, df):
-    """Return (segs, stats). segs = list dict(symbol, dir(+1/-1), e_ts, e_px, x_ts, x_px, reason); reason: 'cross' | 'liq'.
-    Filter entry: c1 level searah berFVG harus berada di ci-(LEVEL_BEFORE-1) .. ci+LEVEL_AFTER (candle cross = candle ke-1).
-    FVG sudah selesai saat cross (k <= ci) -> entry market di open ci+1. Belum -> tunggu FVG selesai, entry di open k+1
-    (boleh jauh dari cross), asal sebelum cross berlawanan."""
+    """Return (segs, stats). segs = list dict(symbol, dir(+1/-1), e_ts, e_px, sl, x_ts, x_px, reason); reason: 'sl' | 'cross' | 'liq'.
+    Filter entry: c1 level searah berFVG di ci-(LEVEL_BEFORE-1) .. ci+LEVEL_AFTER (candle cross = candle ke-1).
+    FVG sudah selesai saat cross (k <= ci) -> entry market di open ci+1. Belum -> tunggu FVG selesai, entry di open k+1,
+    asal sebelum cross berlawanan. SL = wick terjauh c1/c2 level yang dipakai."""
     o = df['open'].values.astype(float); h = df['high'].values.astype(float)
     l = df['low'].values.astype(float);  c = df['close'].values.astype(float)
     ts = df['ts'].values.astype(np.int64)
     n = len(c)
-    stats = {'cross': 0, 'valid': 0, 'filtered': 0, 'langsung': 0, 'tunggu': 0}
+    stats = {'cross': 0, 'valid': 0, 'filtered': 0, 'langsung': 0, 'tunggu': 0, 'sl_invalid': 0}
     if n < EMA_WARMUP + 5:
         return [], stats
     cs = pd.Series(c)
@@ -229,46 +231,61 @@ def build_segments(symbol, df):
     dc = np.flatnonzero(~up[1:] & up[:-1]) + 1          # death cross
     crosses = sorted([(int(i), 1) for i in gc if i >= EMA_WARMUP] + [(int(i), -1) for i in dc if i >= EMA_WARMUP])
     stats['cross'] = len(crosses)
-    acts = {1: level_activations(o, h, l, c, 1), -1: level_activations(o, h, l, c, -1)} if LEVEL_FILTER else {}
+    acts = {1: level_activations(o, h, l, c, 1), -1: level_activations(o, h, l, c, -1)}
     segs = []
     for k_, (ci, d) in enumerate(crosses):
         if k_ + 1 >= len(crosses):
             break                                        # posisi terakhir belum selesai -> tidak dihitung
         nxt = crosses[k_ + 1][0]
-        x = nxt + 1                                      # exit selalu di open candle setelah cross berikutnya (tanpa filter)
-        mode = None
-        if not LEVEL_FILTER:
-            e = ci + 1
-        else:
-            c1s, ks = acts[d]
-            inw = (c1s >= ci - (LEVEL_BEFORE - 1)) & (c1s <= ci + LEVEL_AFTER)   # c1 level di jendela (cross = candle ke-1)
-            kk = ks[inw]
-            if len(kk) and (kk <= ci).any():
-                e = ci + 1; mode = 'langsung'            # FVG sudah selesai saat cross -> entry market
-            elif len(kk) and int(kk.min()) < nxt:        # tunggu FVG selesai, harus sebelum cross berlawanan
-                e = int(kk.min()) + 1; mode = 'tunggu'
+        x = nxt + 1                                      # exit via cross: open candle setelah cross berikutnya (tanpa filter)
+        c1s, ks = acts[d]
+        idx = np.flatnonzero((c1s >= ci - (LEVEL_BEFORE - 1)) & (c1s <= ci + LEVEL_AFTER))   # c1 level di jendela
+        sel = None; mode = None; e = None
+        if len(idx):
+            kk = ks[idx]
+            pre = np.flatnonzero(kk <= ci)
+            if len(pre):                                 # FVG sudah selesai saat cross -> entry market; pilih level terbaru
+                best = max(pre, key=lambda j: (int(kk[j]), int(c1s[idx[j]])))
+                sel = int(idx[best]); e = ci + 1; mode = 'langsung'
             else:
-                stats['filtered'] += 1
-                continue
+                j = int(np.argmin(kk))                   # level yang FVG-nya selesai paling awal setelah cross
+                if int(kk[j]) < nxt:                     # harus sebelum cross berlawanan
+                    sel = int(idx[j]); e = int(kk[j]) + 1; mode = 'tunggu'
+        if sel is None:
+            stats['filtered'] += 1
+            continue
         if e >= n or x >= n or e >= x:
             continue
+        c1 = int(c1s[sel])
+        sl = float(min(l[c1], l[c1 + 1])) if d == 1 else float(max(h[c1], h[c1 + 1]))   # ujung wick c1/c2 paling jauh
+        e_px = float(o[e])
+        if (d == 1 and e_px <= sl) or (d == -1 and e_px >= sl):
+            stats['sl_invalid'] += 1                     # harga entry sudah di sisi rugi dari SL
+            continue
         stats['valid'] += 1
-        if mode:
-            stats[mode] += 1
-        e_px = o[e]
-        liq_idx = None
-        if LIQ_PCT > 0:
-            if d == 1:
-                hit = l[e:x] <= e_px * (1 - LIQ_PCT)
-            else:
-                hit = h[e:x] >= e_px * (1 + LIQ_PCT)
-            if hit.any():
-                liq_idx = e + int(hit.argmax())
-        if liq_idx is not None:
-            x_ts = int(ts[liq_idx]); x_px = e_px * (1 - LIQ_PCT) if d == 1 else e_px * (1 + LIQ_PCT); reason = 'liq'
+        stats[mode] += 1
+
+        # exit: SL / likuidasi / cross -- mana yang duluan (candle e..x-1; SL dicek juga di candle entry)
+        if d == 1:
+            sl_hit = l[e:x] <= sl
+            liq_px = e_px * (1 - LIQ_PCT)
+            liq_hit = (l[e:x] <= liq_px) if LIQ_PCT > 0 else np.zeros(x - e, dtype=bool)
         else:
-            x_ts = int(ts[x]); x_px = float(o[x]); reason = 'cross'
-        segs.append({'symbol': symbol, 'dir': d, 'e_ts': int(ts[e]), 'e_px': float(e_px),
+            sl_hit = h[e:x] >= sl
+            liq_px = e_px * (1 + LIQ_PCT)
+            liq_hit = (h[e:x] >= liq_px) if LIQ_PCT > 0 else np.zeros(x - e, dtype=bool)
+        sl_idx = e + int(sl_hit.argmax()) if sl_hit.any() else None
+        liq_idx = e + int(liq_hit.argmax()) if liq_hit.any() else None
+        sl_closer = (sl >= liq_px) if d == 1 else (sl <= liq_px)
+        if sl_idx is not None and (liq_idx is None or sl_idx < liq_idx or (sl_idx == liq_idx and sl_closer)):
+            reason = 'sl'; xi = sl_idx
+            x_px = min(sl, float(o[xi])) if d == 1 else max(sl, float(o[xi]))     # gap: exit di open kalau sudah melewati SL
+            x_ts = int(ts[xi])
+        elif liq_idx is not None:
+            reason = 'liq'; xi = liq_idx; x_px = liq_px; x_ts = int(ts[xi])
+        else:
+            reason = 'cross'; x_px = float(o[x]); x_ts = int(ts[x])
+        segs.append({'symbol': symbol, 'dir': d, 'e_ts': int(ts[e]), 'e_px': e_px, 'sl': sl,
                      'x_ts': x_ts, 'x_px': float(x_px), 'reason': reason})
     return segs, stats
 
@@ -286,28 +303,37 @@ def simulate(all_segs):
     used = 0.0
     live = {}
     trades = []
-    blocked = 0
+    blocked_margin = 0
+    blocked_min = 0
     peak = balance
     max_dd = 0.0
     for t, typ, sid in events:
         s = all_segs[sid]
         if typ == 1:
             if balance <= 0:
-                blocked += 1
+                blocked_margin += 1
                 continue
-            margin = balance * RISK_PCT
-            if margin * LEVERAGE < MIN_ORDER_USD:        # di bawah minimum order Bybit -> naikkan ke minimum
-                margin = MIN_ORDER_USD / LEVERAGE
+            dist = abs(s['e_px'] - s['sl'])
+            risk_amt = balance * RISK_PCT                # risk PER TRADE
+            qty = risk_amt / dist
+            notional = qty * s['e_px']
+            if notional < MIN_ORDER_USD:
+                if notional >= ORDER_BUMP_FLOOR:         # dinaikkan ke minimum order (risk sedikit > RISK_PCT)
+                    qty = MIN_ORDER_USD / s['e_px']
+                    notional = MIN_ORDER_USD
+                else:
+                    blocked_min += 1
+                    continue
+            margin = notional / LEVERAGE
             if used + margin > balance * MARGIN_USAGE_CAP:
-                blocked += 1
+                blocked_margin += 1
                 continue
-            qty = margin * LEVERAGE / s['e_px']
-            live[sid] = (qty, margin)
+            live[sid] = (qty, margin, dist)
             used += margin
         else:
             if sid not in live:
                 continue
-            qty, margin = live.pop(sid)
+            qty, margin, dist = live.pop(sid)
             used -= margin
             d = s['dir']
             if s['reason'] == 'liq':
@@ -320,14 +346,21 @@ def simulate(all_segs):
             peak = max(peak, balance)
             if peak > 0:
                 max_dd = max(max_dd, (peak - balance) / peak * 100)
-            trades.append({**s, 'margin': margin, 'pnl': pnl, 'pnl_pct': pnl / margin * 100, 'balance_after': balance})
+            r_mult = pnl / (qty * dist) if qty * dist > 0 else 0.0
+            trades.append({**s, 'qty': qty, 'margin': margin, 'pnl': pnl, 'r': r_mult,
+                           'pnl_pct': pnl / margin * 100, 'balance_after': balance})
     n = len(trades)
     wins = sum(1 for x in trades if x['pnl'] > 0)
-    liqs = sum(1 for x in trades if x['reason'] == 'liq')
+    total_r = sum(x['r'] for x in trades)
     summary = {
-        'n_trades': n, 'n_win': wins, 'wr': (wins / n * 100) if n else 0.0, 'n_liq': liqs,
+        'n_trades': n, 'n_win': wins, 'wr': (wins / n * 100) if n else 0.0,
+        'n_sl': sum(1 for x in trades if x['reason'] == 'sl'),
+        'n_cross': sum(1 for x in trades if x['reason'] == 'cross'),
+        'n_liq': sum(1 for x in trades if x['reason'] == 'liq'),
+        'total_r': total_r, 'avg_r': (total_r / n) if n else 0.0,
         'final_balance': balance, 'roi': (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100,
-        'total_pnl': balance - INITIAL_BALANCE, 'max_dd': max_dd, 'blocked': blocked,
+        'total_pnl': balance - INITIAL_BALANCE, 'max_dd': max_dd,
+        'blocked_margin': blocked_margin, 'blocked_min': blocked_min,
         'avg_win': (sum(x['pnl'] for x in trades if x['pnl'] > 0) / wins) if wins else 0.0,
         'avg_loss': (sum(x['pnl'] for x in trades if x['pnl'] <= 0) / (n - wins)) if n - wins else 0.0,
     }
@@ -337,12 +370,15 @@ def simulate(all_segs):
 def per_coin_breakdown(trades):
     by = {}
     for t in trades:
-        d = by.setdefault(t['symbol'], {'n': 0, 'win': 0, 'pnl': 0.0, 'liq': 0})
+        d = by.setdefault(t['symbol'], {'n': 0, 'win': 0, 'pnl': 0.0, 'r': 0.0, 'sl': 0, 'liq': 0})
         d['n'] += 1
         d['win'] += 1 if t['pnl'] > 0 else 0
         d['pnl'] += t['pnl']
+        d['r'] += t['r']
+        d['sl'] += 1 if t['reason'] == 'sl' else 0
         d['liq'] += 1 if t['reason'] == 'liq' else 0
-    rows = [{'symbol': s, 'n': d['n'], 'wr': d['win'] / d['n'] * 100, 'pnl': d['pnl'], 'liq': d['liq']} for s, d in by.items()]
+    rows = [{'symbol': s, 'n': d['n'], 'wr': d['win'] / d['n'] * 100, 'pnl': d['pnl'], 'r': d['r'],
+             'sl': d['sl'], 'liq': d['liq']} for s, d in by.items()]
     rows.sort(key=lambda r: -r['pnl'])
     return rows
 
@@ -372,11 +408,9 @@ def monthly_breakdown(trades):
 def _run():
     global _phase, _summary, _per_coin, _per_coin_indep, _monthly
     try:
-        win_txt = (f"ON (c1 level {LEVEL_BEFORE} candle sebelum cross s/d {LEVEL_AFTER} candle setelah cross)"
-                   if LEVEL_FILTER else "OFF")
-        _log_msg(f"🚀 Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} cross H1 (stop-and-reverse, tanpa SL/TP) — {len(SYMBOLS)} koin, "
-                 f"{BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}; margin {RISK_PCT*100:g}%/posisi, leverage {LEVERAGE:g}x, "
-                 f"likuidasi ±{LIQ_PCT*100:.1f}%, filter level berFVG {win_txt}")
+        _log_msg(f"🚀 Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} cross H1 + level berFVG + SL wick c1/c2 — {len(SYMBOLS)} koin, "
+                 f"{BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}; risk {RISK_PCT*100:g}%/trade, leverage {LEVERAGE:g}x, "
+                 f"likuidasi ±{LIQ_PCT*100:.1f}%, c1 level {LEVEL_BEFORE} candle sebelum cross s/d {LEVEL_AFTER} candle setelah cross")
         all_segs = []
         segs_by = {}
         for symbol in SYMBOLS:
@@ -389,10 +423,11 @@ def _run():
             segs, st = build_segments(symbol, df)
             segs_by[symbol] = segs
             all_segs.extend(segs)
+            n_sl = sum(1 for s in segs if s['reason'] == 'sl')
             n_liq = sum(1 for s in segs if s['reason'] == 'liq')
             _log_msg(f"   ✅ {symbol}: {len(df):,} candle, {st['cross']} cross, {st['filtered']} gugur (tanpa level), "
-                     f"{st['langsung']} entry langsung + {st['tunggu']} entry setelah menunggu, "
-                     f"{len(segs)} posisi selesai ({n_liq} likuidasi)")
+                     f"{st['sl_invalid']} SL tidak valid, {st['langsung']} entry langsung + {st['tunggu']} entry setelah menunggu; "
+                     f"{len(segs)} posisi selesai ({n_sl} SL, {n_liq} likuidasi)")
         _log_msg(f"🧮 Simulasi gabungan ({len(all_segs)} posisi)...")
         trades, summ = simulate(all_segs)
         monthly, avg_g = monthly_breakdown(trades)
@@ -401,8 +436,9 @@ def _run():
         indep = []
         for sym, sg in segs_by.items():
             _, sm = simulate(sg)
-            indep.append({'symbol': sym, 'n': sm['n_trades'], 'wr': sm['wr'], 'liq': sm['n_liq'],
-                          'final': sm['final_balance'], 'roi': sm['roi'], 'max_dd': sm['max_dd'], 'blocked': sm['blocked']})
+            indep.append({'symbol': sym, 'n': sm['n_trades'], 'wr': sm['wr'], 'sl': sm['n_sl'], 'liq': sm['n_liq'],
+                          'total_r': sm['total_r'], 'final': sm['final_balance'], 'roi': sm['roi'], 'max_dd': sm['max_dd'],
+                          'blocked': sm['blocked_margin'] + sm['blocked_min']})
         indep.sort(key=lambda r: -r['roi'])
 
         with _lock:
@@ -412,7 +448,8 @@ def _run():
             _per_coin_indep = indep
             _monthly = monthly
             _phase = 'done'
-        _log_msg(f"✅ SELESAI. {summ['n_trades']} trade, WR {summ['wr']:.1f}%, likuidasi {summ['n_liq']}, "
+        _log_msg(f"✅ SELESAI. {summ['n_trades']} trade, WR {summ['wr']:.1f}%, Total R {summ['total_r']:+.2f}, "
+                 f"SL {summ['n_sl']} / cross {summ['n_cross']} / likuidasi {summ['n_liq']}, "
                  f"balance akhir ${summ['final_balance']:.2f} (ROI {summ['roi']:+.1f}%), max drawdown {summ['max_dd']:.1f}%")
     except Exception as e:
         _log_msg(f"❌ ERROR: {e}")
@@ -447,12 +484,14 @@ def _render_html():
 
     cards = ''
     if s:
-        liq_cls = 'neg' if g('n_liq') else ''
         cards = (
             '<div class="cards">'
             f'<div class="card"><div class="label">Total Trade</div><div class="value">{g("n_trades")}</div></div>'
             f'<div class="card"><div class="label">Win Rate</div><div class="value">{g("wr"):.1f}%</div></div>'
-            f'<div class="card"><div class="label">Likuidasi</div><div class="value {liq_cls}">{g("n_liq")}</div></div>'
+            f'<div class="card"><div class="label">Total R</div><div class="value {cls(g("total_r"))}">{g("total_r"):+.2f}</div></div>'
+            f'<div class="card"><div class="label">Avg R/Trade</div><div class="value {cls(g("avg_r"))}">{g("avg_r"):+.2f}</div></div>'
+            f'<div class="card"><div class="label">Exit SL / Cross / Likuidasi</div><div class="value" style="font-size:16px">'
+            f'{g("n_sl")} / {g("n_cross")} / {g("n_liq")}</div></div>'
             f'<div class="card"><div class="label">Balance Akhir</div><div class="value">${g("final_balance"):.2f}</div></div>'
             f'<div class="card"><div class="label">ROI</div><div class="value {cls(g("roi"))}">{g("roi"):+.1f}%</div></div>'
             f'<div class="card"><div class="label">Max Drawdown</div><div class="value neg">{g("max_dd"):.1f}%</div></div>'
@@ -460,21 +499,21 @@ def _render_html():
             f'${g("avg_win"):+.2f} / ${g("avg_loss"):+.2f}</div></div>'
             '</div>'
         )
-    coin_rows = ''.join(f'<tr><td>{r["symbol"]}</td><td>{r["n"]}</td><td>{r["wr"]:.1f}%</td><td>{r["liq"]}</td>'
+    coin_rows = ''.join(f'<tr><td>{r["symbol"]}</td><td>{r["n"]}</td><td>{r["wr"]:.1f}%</td><td>{r["sl"]}</td><td>{r["liq"]}</td>'
+                        f'<td class="{cls(r["r"])}">{r["r"]:+.2f}</td>'
                         f'<td class="{cls(r["pnl"])}">${r["pnl"]:+.2f}</td></tr>' for r in coins)
-    indep_rows = ''.join(f'<tr><td>{r["symbol"]}</td><td>{r["n"]}</td><td>{r["wr"]:.1f}%</td><td>{r["liq"]}</td>'
+    indep_rows = ''.join(f'<tr><td>{r["symbol"]}</td><td>{r["n"]}</td><td>{r["wr"]:.1f}%</td><td>{r["sl"]}</td><td>{r["liq"]}</td>'
+                         f'<td class="{cls(r["total_r"])}">{r["total_r"]:+.2f}</td>'
                          f'<td>${r["final"]:.2f}</td><td class="{cls(r["roi"])}">{r["roi"]:+.1f}%</td>'
                          f'<td class="neg">{r["max_dd"]:.1f}%</td><td>{r["blocked"]}</td></tr>' for r in indep)
     month_rows = ''.join(f'<tr><td>{r["month"]}</td><td>{r["n"]}</td><td>{r["wr"]:.1f}%</td><td>${r["start"]:.2f}</td>'
                          f'<td>${r["end"]:.2f}</td><td class="{cls(r["profit"])}">${r["profit"]:+.2f}</td>'
                          f'<td class="{cls(r["growth"])}">{r["growth"]:+.1f}%</td></tr>' for r in months)
     avg_g = g('avg_growth', 0.0)
-    if LEVEL_FILTER:
-        filt = (f'Filter entry: c1 level searah berFVG (FVG dari C{FVG_FIRST_C}-C{FVG_LAST_C}) harus berada dalam {LEVEL_BEFORE} candle terakhir '
-                f'sebelum cross (candle cross = ke-1) sampai {LEVEL_AFTER} candle setelah cross. FVG sudah selesai saat cross -> langsung entry; '
-                f'belum -> tunggu FVG selesai (entry boleh jauh dari cross); kalau tidak ada, sinyal gugur. Exit tetap hanya cross.')
-    else:
-        filt = 'Filter entry: OFF.'
+    filt = (f'Filter entry: c1 level searah berFVG (FVG dari C{FVG_FIRST_C}-C{FVG_LAST_C}) harus berada dalam {LEVEL_BEFORE} candle terakhir '
+            f'sebelum cross (candle cross = ke-1) sampai {LEVEL_AFTER} candle setelah cross. FVG sudah selesai saat cross -> entry market saat itu; '
+            f'belum -> tunggu FVG selesai lalu entry market; kalau tidak ada, sinyal gugur. '
+            f'SL = ujung wick terjauh c1/c2 level (Long: wick bawah, Short: wick atas). Tanpa TP; exit via SL, cross berlawanan, atau likuidasi.')
 
     css = '''
  body { font-family:-apple-system,Arial,sans-serif; background:#0f1117; color:#e6e6e6; margin:0; padding:20px; }
@@ -495,22 +534,23 @@ def _render_html():
     html = (
         '<!DOCTYPE html><html lang="id"><head><meta charset="utf-8"><meta http-equiv="refresh" content="10">'
         '<title>Backtest EMA Cross H1</title><style>' + css + '</style></head><body>'
-        f'<h1>📊 Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} Cross — H1, stop-and-reverse</h1>'
+        f'<h1>📊 Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} Cross — H1 + level berFVG + SL</h1>'
         + status + cards +
         '<div class="note">'
-        f'Golden cross → Long, death cross → tutup &amp; Short (dan sebaliknya). Tanpa SL/TP. {filt}<br>'
-        f'Margin {RISK_PCT*100:g}% balance per posisi (min order ${MIN_ORDER_USD:g}), leverage {LEVERAGE:g}x '
-        f'(likuidasi bila harga melawan ±{LIQ_PCT*100:.1f}%). Fee {FEE_ENTRY_PCT*100:.2f}% masuk / {FEE_EXIT_PCT*100:.2f}% keluar. '
-        f'Modal awal ${INITIAL_BALANCE:g}. Sinyal terlewat (margin penuh, simulasi gabungan): {g("blocked")}.<br>'
+        f'Golden cross → Long, death cross → tutup &amp; Short (dan sebaliknya). {filt}<br>'
+        f'Risk {RISK_PCT*100:g}% balance PER TRADE (jarak entry–SL), leverage {LEVERAGE:g}x, min order ${MIN_ORDER_USD:g} '
+        f'(notional ${ORDER_BUMP_FLOOR:g}–${MIN_ORDER_USD:g} dinaikkan ke minimum, di bawahnya dilewati), '
+        f'likuidasi bila harga melawan ±{LIQ_PCT*100:.1f}%. Fee {FEE_ENTRY_PCT*100:.2f}% masuk / {FEE_EXIT_PCT*100:.2f}% keluar. '
+        f'Modal awal ${INITIAL_BALANCE:g}. Setup terlewat (simulasi gabungan): margin {g("blocked_margin")}, di bawah min order {g("blocked_min")}.<br>'
         '<a href="/trades.csv">/trades.csv</a> | <a href="/logs">/logs</a></div>'
         '<h2>Per Bulan (simulasi gabungan)</h2>'
         f'<div class="note">Rata-rata pertumbuhan: <b class="{cls(avg_g)}">{avg_g:+.1f}% / bulan</b></div>'
         '<table><tr><th>Bulan</th><th>Trade</th><th>WR%</th><th>Balance Awal</th><th>Balance Akhir</th><th>Profit</th><th>Pertumbuhan</th></tr>'
         + month_rows + '</table>'
         '<h2>Kontribusi per Koin (simulasi gabungan, 1 balance bersama)</h2>'
-        '<table><tr><th>Symbol</th><th>Trade</th><th>WR%</th><th>Likuidasi</th><th>Total PnL</th></tr>' + coin_rows + '</table>'
+        '<table><tr><th>Symbol</th><th>Trade</th><th>WR%</th><th>SL</th><th>Likuidasi</th><th>Total R</th><th>Total PnL</th></tr>' + coin_rows + '</table>'
         f'<h2>Simulasi Per-Koin (independen, modal awal ${INITIAL_BALANCE:g} sendiri-sendiri)</h2>'
-        '<table><tr><th>Symbol</th><th>Trade</th><th>WR%</th><th>Likuidasi</th><th>Balance Akhir</th><th>ROI</th><th>Max DD</th><th>Terlewat</th></tr>'
+        '<table><tr><th>Symbol</th><th>Trade</th><th>WR%</th><th>SL</th><th>Likuidasi</th><th>Total R</th><th>Balance Akhir</th><th>ROI</th><th>Max DD</th><th>Terlewat</th></tr>'
         + indep_rows + '</table>'
         '<h2>Log</h2><div class="log" id="log">' + log_html + '</div>'
         "<script>var e=document.getElementById('log');if(e)e.scrollTop=e.scrollHeight;</script>"
@@ -519,7 +559,7 @@ def _render_html():
     return html.encode('utf-8')
 
 
-CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Entry time', 'Entry', 'Exit time', 'Exit', 'Alasan exit', 'Margin', 'PnL USD', 'PnL % margin']
+CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'R', 'Entry time', 'Entry', 'SL', 'Exit time', 'Exit', 'Alasan exit', 'Margin', 'PnL USD']
 
 
 def _trades_csv():
@@ -529,9 +569,9 @@ def _trades_csv():
     w = csv.writer(buf)
     w.writerow(CSV_COLUMNS)
     for t in tr:
-        w.writerow([t['symbol'], 'LONG' if t['dir'] == 1 else 'SHORT', 'WIN' if t['pnl'] > 0 else 'LOSS',
-                    _fmt_wib(t['e_ts']), f"{t['e_px']:.10g}", _fmt_wib(t['x_ts']), f"{t['x_px']:.10g}",
-                    t['reason'], f"{t['margin']:.4f}", f"{t['pnl']:.4f}", f"{t['pnl_pct']:.2f}"])
+        w.writerow([t['symbol'], 'LONG' if t['dir'] == 1 else 'SHORT', 'WIN' if t['pnl'] > 0 else 'LOSS', f"{t['r']:+.2f}",
+                    _fmt_wib(t['e_ts']), f"{t['e_px']:.10g}", f"{t['sl']:.10g}",
+                    _fmt_wib(t['x_ts']), f"{t['x_px']:.10g}", t['reason'], f"{t['margin']:.4f}", f"{t['pnl']:.4f}"])
     return buf.getvalue().encode('utf-8')
 
 
