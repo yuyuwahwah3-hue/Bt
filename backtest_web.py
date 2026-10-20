@@ -1,22 +1,27 @@
 """
-backtest_cross.py — Backtest EMA21/EMA30 cross H1 + filter IFVG H1, stop-and-reverse
-====================================================================================
+backtest_cross.py — Backtest EMA21/EMA30 cross H1 + filter LEVEL searah berFVG, stop-and-reverse
+===============================================================================================
 - Timeframe H1 saja. EMA21 (cepat) & EMA30 (lambat) dari close.
 - Golden cross -> LONG, death cross -> SHORT (tutup posisi lawan lalu balik arah). Tanpa SL, tanpa TP.
-- FILTER ENTRY (IFVG_FILTER=1): setelah cross di candle H1 ci, cek IFVG H1 searah dalam IFVG_WINDOW=10 candle ke belakang (ci-9..ci,
-  candle cross ikut). Long: FVG bullish (x1,x2,x3; x2 bullish, low[x3] > high[x1]) yang 'mengambil' FVG bearish sebelumnya
-  (y1,y2,y3; y2 bearish, high[y3] < low[y1]) -> zona overlap, dan overlap belum tersentuh antara y3 s/d sebelum x1. Candle x3 harus
-  berada di dalam jendela; FVG bearish boleh sampai IFVG_LOOKBACK=48 candle sebelum x1. Short = cermin.
-  Entry di open candle H1 setelah cross.
-- EXIT tidak difilter: posisi selalu ditutup di open candle H1 setelah cross berlawanan. Kalau cross itu tidak punya IFVG,
-  bot flat sampai ada cross berikutnya yang lolos.
+- LEVEL berFVG (sama dgn bot lama, disederhanakan):
+    Support (Long): c1 bearish, c2 bullish, level = close c1, c3 tidak menyentuh level (low[c3] > level).
+    FVG bullish dari C{FVG_FIRST_C}..C{FVG_LAST_C} (default C2..C4 = a=c2, b=c3, k=c4): low[k] > high[a] dan close[k] > high[b].
+    Level gugur kalau sejak c4 s/d candle k harga menyentuh level. Level 'terjadi' saat candle k closed.
+    Resisten (Short) = cermin.
+- FILTER ENTRY (LEVEL_FILTER=1): saat cross di candle ci,
+    a) kalau level searah berFVG terjadi (candle k) dalam LEVEL_BEFORE=5 candle sebelum cross (ci-5..ci) -> entry di open candle ci+1.
+    b) kalau tidak ada, tunggu sampai LEVEL_AFTER=10 candle setelah cross (k di ci+1..ci+10) -> entry di open candle setelah k pertama.
+    c) kalau tetap tidak ada, atau cross berlawanan muncul duluan -> sinyal gugur.
+- EXIT tidak difilter: posisi selalu ditutup di open candle H1 setelah cross berlawanan. Cross tanpa level -> bot flat
+  sampai ada cross berikutnya yang lolos.
 - Ukuran posisi: MARGIN = RISK_PCT x balance (5%), leverage 10x -> notional 50% balance ($5 pada modal $10 = minimum order Bybit).
   Kalau notional < MIN_ORDER_USD -> dinaikkan ke minimum.
 - Likuidasi (isolated): harga melawan >= (1/LEVERAGE - LIQ_MMR) dari entry (dicek per candle H1) -> margin hilang.
 - Fee: 0.1% masuk, 0.3% keluar dari nilai posisi. Posisi terbuka di akhir data tidak dihitung.
 - Dua simulasi: GABUNGAN (1 balance bersama) dan PER-KOIN independen (tiap koin modal awal sendiri).
-Env: INITIAL_BALANCE, RISK_PCT, LEVERAGE, MIN_ORDER_USD, IFVG_FILTER, IFVG_WINDOW, IFVG_LOOKBACK, EMA_FAST, EMA_SLOW, EMA_WARMUP,
-FEE_ENTRY_PCT, FEE_EXIT_PCT, LIQ_MMR, MARGIN_USAGE_CAP, BACKTEST_START_DATE, BACKTEST_END_DATE, SYMBOLS (pisah koma).
+Env: INITIAL_BALANCE, RISK_PCT, LEVERAGE, MIN_ORDER_USD, LEVEL_FILTER, LEVEL_BEFORE, LEVEL_AFTER, FVG_FIRST_C, FVG_LAST_C,
+EMA_FAST, EMA_SLOW, EMA_WARMUP, FEE_ENTRY_PCT, FEE_EXIT_PCT, LIQ_MMR, MARGIN_USAGE_CAP, BACKTEST_START_DATE, BACKTEST_END_DATE,
+SYMBOLS (pisah koma).
 Start command Railway: python backtest_cross.py
 """
 import os, threading, time, io, csv
@@ -36,9 +41,11 @@ INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))
 LEVERAGE         = float(os.environ.get('LEVERAGE', '10'))
 MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))
-IFVG_FILTER      = os.environ.get('IFVG_FILTER', '1').strip() not in ('0', 'false', 'False', 'off', '')
-IFVG_WINDOW      = int(os.environ.get('IFVG_WINDOW', 7))            # IFVG harus selesai (candle ke-3) dalam N candle ke belakang dari candle cross
-IFVG_LOOKBACK    = int(os.environ.get('IFVG_LOOKBACK', 48))          # FVG lawan boleh mundur maks N candle sebelum FVG searah mulai
+LEVEL_FILTER     = os.environ.get('LEVEL_FILTER', '1').strip() not in ('0', 'false', 'False', 'off', '')
+LEVEL_BEFORE     = int(os.environ.get('LEVEL_BEFORE', 5))            # level berFVG boleh terjadi maks N candle sebelum cross (candle cross ikut)
+LEVEL_AFTER      = int(os.environ.get('LEVEL_AFTER', 10))            # kalau belum ada, tunggu maks N candle setelah cross
+FVG_FIRST_C      = int(os.environ.get('FVG_FIRST_C', 1))             # FVG mulai dari candle ke-N level (C2)
+FVG_LAST_C       = int(os.environ.get('FVG_LAST_C', 4))              # FVG selesai paling lambat di candle ke-N level (C4)
 EMA_FAST         = int(os.environ.get('EMA_FAST', 21))
 EMA_SLOW         = int(os.environ.get('EMA_SLOW', 30))
 EMA_WARMUP       = int(os.environ.get('EMA_WARMUP', 100))
@@ -47,7 +54,7 @@ FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 LIQ_MMR          = float(os.environ.get('LIQ_MMR', '0.005'))
 LIQ_PCT          = max(0.0, 1.0 / LEVERAGE - LIQ_MMR)
 MARGIN_USAGE_CAP = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
-EPS              = 1e-12
+WICK_EPS         = 1e-9
 
 def _default_end_date():
     return datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -165,48 +172,45 @@ def fetch_h1(symbol):
 
 
 # ============================================================
-# FILTER IFVG H1
+# LEVEL searah berFVG (H1)
 # ============================================================
-def has_ifvg(o, h, l, c, ci, d):
-    """Ada IFVG H1 searah (d=+1 Long, -1 Short) yang candle ke-3 (x3)-nya berada di ci-IFVG_WINDOW+1 .. ci?
-    Long: FVG bullish x1,x2,x3 (x2 bullish, low[x3] > high[x1]) 'mengambil' FVG bearish y1,y2,y3 (y2 bearish, high[y3] < low[y1]):
-    zona saling overlap, y3 < x1, dan overlap belum tersentuh (high candle y3+1..x1-1 <= dasar overlap).
-    Short = cermin (harga dibalik)."""
+def level_activations(o, h, l, c, d):
+    """Indeks candle k (FVG selesai / closed) dari semua level searah berFVG. d=+1: support (Long), d=-1: resisten (Short).
+    Support: c1 bearish, c2 bullish, level = close c1, c3 tidak menyentuh level. FVG bullish dari C{FVG_FIRST_C}..C{FVG_LAST_C}
+    (a, b=a+1, k=a+2): low[k] > high[a] dan close[k] > high[b]. Gugur kalau sejak c4 s/d k harga menyentuh level. Short = cermin."""
     if d == -1:
         o, h, l, c = -o, -l, -h, -c                       # cerminkan ke Long
-    for x3 in range(ci, ci - IFVG_WINDOW, -1):
-        x1 = x3 - 2
-        if x1 < 2:
-            break
-        if not (c[x3 - 1] > o[x3 - 1] and l[x3] > h[x1] + EPS):
-            continue                                        # bukan FVG bullish
-        ub, ut = h[x1], l[x3]                               # zona FVG searah [ub, ut]
-        for y3 in range(x1 - 1, max(1, x1 - IFVG_LOOKBACK) - 1, -1):
-            y1 = y3 - 2
-            if y1 < 0:
+    n = len(c)
+    out = []
+    first_off = FVG_FIRST_C - 1
+    for i in range(0, n - 4):
+        if not (c[i] < o[i] and c[i + 1] > o[i + 1] and l[i + 2] > c[i] + WICK_EPS):
+            continue
+        L = c[i]
+        for a in range(i + first_off, i + FVG_LAST_C - 2):    # k = a+2 <= i + FVG_LAST_C - 1
+            k = a + 2
+            if k >= n:
                 break
-            if not (c[y3 - 1] < o[y3 - 1] and h[y3] < l[y1] - EPS):
-                continue                                    # bukan FVG bearish
-            bb, bt = h[y3], l[y1]                           # zona FVG lawan [bb, bt]
-            if not (ub < bt and ut > bb):
-                continue                                    # tidak overlap
-            if y3 + 1 <= x1 - 1 and h[y3 + 1:x1].max() > max(bb, ub) + EPS:
-                continue                                    # overlap sudah tersentuh sebelum FVG searah mulai
-            return True
-    return False
+            if l[k] > h[a] and c[k] > h[a + 1]:
+                seg = l[i + 3:k + 1]
+                if not (len(seg) and (seg <= L + WICK_EPS).any()):
+                    out.append(k)
+                break
+    return np.array(sorted(out), dtype=np.int64)
 
 
 # ============================================================
-# SINYAL: segmen posisi per koin (stop-and-reverse + filter IFVG)
+# SINYAL: segmen posisi per koin (stop-and-reverse + filter level berFVG)
 # ============================================================
 def build_segments(symbol, df):
     """Return (segs, stats). segs = list dict(symbol, dir(+1/-1), e_ts, e_px, x_ts, x_px, reason); reason: 'cross' | 'liq'.
-    stats = {'cross': total cross, 'valid': lolos filter & selesai, 'filtered': tanpa IFVG}."""
+    stats = {'cross': total cross, 'valid': lolos filter & selesai, 'filtered': tanpa level, 'langsung': entry dari level sebelum cross,
+             'tunggu': entry dari level setelah cross}."""
     o = df['open'].values.astype(float); h = df['high'].values.astype(float)
     l = df['low'].values.astype(float);  c = df['close'].values.astype(float)
     ts = df['ts'].values.astype(np.int64)
     n = len(c)
-    stats = {'cross': 0, 'valid': 0, 'filtered': 0}
+    stats = {'cross': 0, 'valid': 0, 'filtered': 0, 'langsung': 0, 'tunggu': 0}
     if n < EMA_WARMUP + 5:
         return [], stats
     cs = pd.Series(c)
@@ -217,18 +221,33 @@ def build_segments(symbol, df):
     dc = np.flatnonzero(~up[1:] & up[:-1]) + 1          # death cross
     crosses = sorted([(int(i), 1) for i in gc if i >= EMA_WARMUP] + [(int(i), -1) for i in dc if i >= EMA_WARMUP])
     stats['cross'] = len(crosses)
+    acts = {1: level_activations(o, h, l, c, 1), -1: level_activations(o, h, l, c, -1)} if LEVEL_FILTER else {}
     segs = []
-    for k, (ci, d) in enumerate(crosses):
-        if k + 1 >= len(crosses):
+    for k_, (ci, d) in enumerate(crosses):
+        if k_ + 1 >= len(crosses):
             break                                        # posisi terakhir belum selesai -> tidak dihitung
-        if IFVG_FILTER and not has_ifvg(o, h, l, c, ci, d):
-            stats['filtered'] += 1
-            continue
-        e = ci + 1                                       # entry di open candle setelah cross
-        x = crosses[k + 1][0] + 1                        # exit selalu di open candle setelah cross berikutnya (tanpa filter)
-        if e >= n or x >= n:
+        nxt = crosses[k_ + 1][0]
+        x = nxt + 1                                      # exit selalu di open candle setelah cross berikutnya (tanpa filter)
+        mode = None
+        if not LEVEL_FILTER:
+            e = ci + 1
+        else:
+            ks = acts[d]
+            before = ks[(ks >= ci - LEVEL_BEFORE) & (ks <= ci)]
+            if len(before):
+                e = ci + 1; mode = 'langsung'            # level sudah ada -> langsung entry
+            else:
+                after = ks[(ks > ci) & (ks <= ci + LEVEL_AFTER)]
+                if len(after) and after[0] < nxt:        # level muncul setelah cross, sebelum cross berlawanan
+                    e = int(after[0]) + 1; mode = 'tunggu'
+                else:
+                    stats['filtered'] += 1
+                    continue
+        if e >= n or x >= n or e >= x:
             continue
         stats['valid'] += 1
+        if mode:
+            stats[mode] += 1
         e_px = o[e]
         liq_idx = None
         if LIQ_PCT > 0:
@@ -348,7 +367,8 @@ def _run():
     try:
         _log_msg(f"🚀 Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} cross H1 (stop-and-reverse, tanpa SL/TP) — {len(SYMBOLS)} koin, "
                  f"{BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}; margin {RISK_PCT*100:g}%/posisi, leverage {LEVERAGE:g}x, "
-                 f"likuidasi ±{LIQ_PCT*100:.1f}%, filter IFVG {'ON (' + str(IFVG_WINDOW) + ' candle ke belakang)' if IFVG_FILTER else 'OFF'}")
+                 f"likuidasi ±{LIQ_PCT*100:.1f}%, filter level berFVG "
+                 f"{'ON (' + str(LEVEL_BEFORE) + ' candle sebelum / ' + str(LEVEL_AFTER) + ' candle setelah cross)' if LEVEL_FILTER else 'OFF'}")
         all_segs = []
         segs_by = {}
         for symbol in SYMBOLS:
@@ -361,7 +381,8 @@ def _run():
             segs, st = build_segments(symbol, df)
             segs_by[symbol] = segs
             all_segs.extend(segs)
-            _log_msg(f"   ✅ {symbol}: {len(df):,} candle, {st['cross']} cross, {st['filtered']} tanpa IFVG, "
+            _log_msg(f"   ✅ {symbol}: {len(df):,} candle, {st['cross']} cross, {st['filtered']} gugur (tanpa level), "
+                     f"{st['langsung']} entry langsung + {st['tunggu']} entry setelah menunggu, "
                      f"{len(segs)} posisi selesai ({sum(1 for s in segs if s['reason']=='liq')} likuidasi)")
         _log_msg(f"🧮 Simulasi gabungan ({len(all_segs)} posisi)...")
         trades, summ = simulate(all_segs)
@@ -427,8 +448,9 @@ def _render_html():
                          f'<td>${r["end"]:.2f}</td><td class="{cls(r["profit"])}">${r["profit"]:+.2f}</td>'
                          f'<td class="{cls(r["growth"])}">{r["growth"]:+.1f}%</td></tr>' for r in months)
     avg_g = g('avg_growth', 0.0)
-    filt = (f'Filter entry: harus ada IFVG H1 searah (FVG searah yang mengambil FVG lawan) yang selesai dalam {IFVG_WINDOW} candle ke belakang '
-            f'dari candle cross; exit tetap hanya cross.') if IFVG_FILTER else 'Filter entry: OFF.'
+    filt = (f'Filter entry: harus ada level searah berFVG (support utk Long, resisten utk Short; FVG dari C{FVG_FIRST_C}-C{FVG_LAST_C}) yang terjadi '
+            f'dalam {LEVEL_BEFORE} candle sebelum cross (langsung entry) atau {LEVEL_AFTER} candle setelah cross (menunggu); kalau tidak ada, sinyal gugur. '
+            f'Exit tetap hanya cross.') if LEVEL_FILTER else 'Filter entry: OFF.'
     return f'''<!DOCTYPE html>
 <html lang="id"><head><meta charset="utf-8"><meta http-equiv="refresh" content="10"><title>Backtest EMA Cross H1</title>
 <style>
