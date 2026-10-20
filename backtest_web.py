@@ -42,9 +42,9 @@ from pybit.unified_trading import HTTP
 # CONFIG
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
-INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))         # risk PER TRADE dari balance (jarak entry-SL)
-LEVERAGE         = float(os.environ.get('LEVERAGE', '10'))
+INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '100.0'))
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))         # risk PER TRADE dari balance (jarak entry-SL)
+LEVERAGE         = float(os.environ.get('LEVERAGE', '15'))
 MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))
 ORDER_BUMP_FLOOR = float(os.environ.get('ORDER_BUMP_FLOOR', '4.0'))  # notional antara floor..min order dinaikkan ke min order; di bawah floor dilewati
 SL_BUFFER_PCT    = float(os.environ.get('SL_BUFFER_PCT', '0.01'))    # SL digeser 1% lebih jauh dari ujung wick c1/c2 (pengaman)
@@ -55,8 +55,8 @@ FVG_LAST_C       = int(os.environ.get('FVG_LAST_C', 4))              # FVG seles
 EMA_FAST         = int(os.environ.get('EMA_FAST', 21))
 EMA_SLOW         = int(os.environ.get('EMA_SLOW', 30))
 EMA_WARMUP       = int(os.environ.get('EMA_WARMUP', 100))
-FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
-FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
+FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0006'))
+FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
 LIQ_MMR          = float(os.environ.get('LIQ_MMR', '0.005'))
 LIQ_PCT          = max(0.0, 1.0 / LEVERAGE - LIQ_MMR)
 MARGIN_USAGE_CAP = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
