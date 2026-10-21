@@ -2,7 +2,7 @@
 backtest_cross.py — Backtest EMA21/EMA30 cross H1 + level berFVG + SL di wick c1/c2 (+buffer), stop-and-reverse
 ===============================================================================================================
 - Timeframe H1 saja. EMA21 (cepat) & EMA30 (lambat) dari close.
-- Golden cross -> LONG, death cross -> SHORT (tutup posisi lawan lalu balik arah). Tanpa TP.
+- Golden cross -> LONG, death cross -> SHORT. Cross berlawanan menutup posisi HANYA kalau posisi profit. Tanpa TP.
 - LEVEL berFVG:
     Support (Long): c1 bearish, c2 bullish, level = close c1, c3 tidak menyentuh level (low[c3] > level).
     FVG bullish dari C{FVG_FIRST_C}..C{FVG_LAST_C} (default C1..C4): bisa C1-C3 (a=c1,b=c2,k=c3) atau C2-C4 (a=c2,b=c3,k=c4):
@@ -16,7 +16,9 @@ backtest_cross.py — Backtest EMA21/EMA30 cross H1 + level berFVG + SL di wick 
     c) tidak ada level di jendela, atau cross berlawanan muncul duluan -> sinyal gugur.
 - SL: Long = wick terbawah antara c1 dan c2 level dikurangi SL_BUFFER_PCT (1%); Short = wick teratas antara c1 dan c2 level
   ditambah SL_BUFFER_PCT (1%). Tidak ada TP. SL tidak valid (entry sudah di sisi rugi dari SL) -> setup dibuang.
-- EXIT: SL kena | cross berlawanan (open candle setelah cross; cross itu tidak difilter) | likuidasi — mana yang duluan.
+- EXIT: rugi HANYA lewat SL/likuidasi; profit lewat cross berlawanan (exit di open candle setelah cross, hanya kalau open itu
+  lebih untung dari entry). Cross berlawanan saat posisi rugi diabaikan: posisi ditahan sampai SL atau cross berlawanan berikutnya
+  yang profit. Selama posisi masih terbuka, sinyal baru di koin itu dilewati (1 posisi per koin).
   Gap: kalau open candle sudah melewati SL, exit di open. Cross tanpa level -> bot flat sampai ada cross berikutnya yang lolos.
 - UKURAN POSISI: RISK per TRADE = RISK_PCT x balance (5%) -> qty = risk / |entry - SL|. Margin = notional / LEVERAGE (10x).
   Notional < MIN_ORDER_USD ($5): kalau >= ORDER_BUMP_FLOOR ($4) dinaikkan ke $5 (risk sedikit > 5%), kalau lebih kecil setup dilewati.
@@ -43,7 +45,7 @@ from pybit.unified_trading import HTTP
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '100.0'))
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))         # risk PER TRADE dari balance (jarak entry-SL)
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))         # risk PER TRADE dari balance (jarak entry-SL)
 LEVERAGE         = float(os.environ.get('LEVERAGE', '10'))
 MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))
 ORDER_BUMP_FLOOR = float(os.environ.get('ORDER_BUMP_FLOOR', '4.0'))  # notional antara floor..min order dinaikkan ke min order; di bawah floor dilewati
@@ -75,13 +77,16 @@ CACHE_DIR = os.environ.get('CACHE_DIR', './data_cache')
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 _DEFAULT_SYMBOLS = [
-    'ENAUSDT', 'LABUSDT', 'ICPUSDT', '1000BONKUSDT', 'VIRTUALUSDT',
-    'JUPUSDT', 'MEWUSDT', 'STRKUSDT', 'USUALUSDT', 'WOOUSDT',
-    'HUSDT', '1000FLOKIUSDT', 'POPCATUSDT', 'IOTAUSDT', 'BOMEUSDT',
-    'WIFUSDT', 'IMXUSDT', 'POLUSDT', 'ADAUSDT', 'BERAUSDT',
-    'PENDLEUSDT'
+    'PENDLEUSDT', 'PYTHUSDT', 'BLURUSDT', '1000BONKUSDT', 'WUSDT',
+    'USUALUSDT', 'ETHFIUSDT', 'LABUSDT', 'IOTAUSDT', '1000FLOKIUSDT',
+    'HBARUSDT', 'PLUMEUSDT', 'BERAUSDT', 'MASKUSDT', 'ESPORTSUSDT',
+    'IMXUSDT', 'CRVUSDT', 'ACHUSDT', 'FARTCOINUSDT', 'AEVOUSDT',
+    'ICPUSDT', 'ENAUSDT', 'ADAUSDT', 'WIFUSDT', 'DYDXUSDT',
+    'BATUSDT', 'LRCUSDT', 'IOUSDT', 'BOMEUSDT', 'OPUSDT',
+    'POPCATUSDT', 'WOOUSDT', 'STORJUSDT', 'ROSEUSDT', 'POWRUSDT',
+    'JUPUSDT', 'HUSDT', 'STRKUSDT', 'IOTXUSDT', 'MEWUSDT',
+    'VIRTUALUSDT', 'POLUSDT', 'CKBUSDT', 'ASTRUSDT'
 ]
-
 _sym_env = os.environ.get('SYMBOLS', '').strip()
 SYMBOLS = [s.strip().upper() for s in _sym_env.split(',') if s.strip()] if _sym_env else _DEFAULT_SYMBOLS
 
@@ -218,7 +223,7 @@ def build_segments(symbol, df):
     l = df['low'].values.astype(float);  c = df['close'].values.astype(float)
     ts = df['ts'].values.astype(np.int64)
     n = len(c)
-    stats = {'cross': 0, 'valid': 0, 'filtered': 0, 'langsung': 0, 'tunggu': 0, 'sl_invalid': 0}
+    stats = {'cross': 0, 'valid': 0, 'filtered': 0, 'langsung': 0, 'tunggu': 0, 'sl_invalid': 0, 'busy': 0}
     if n < EMA_WARMUP + 5:
         return [], stats
     cs = pd.Series(c)
@@ -231,11 +236,12 @@ def build_segments(symbol, df):
     stats['cross'] = len(crosses)
     acts = {1: level_activations(o, h, l, c, 1), -1: level_activations(o, h, l, c, -1)}
     segs = []
+    busy_until = 0                                       # entry baru hanya boleh di candle >= busy_until (1 posisi per koin)
     for k_, (ci, d) in enumerate(crosses):
         if k_ + 1 >= len(crosses):
             break                                        # posisi terakhir belum selesai -> tidak dihitung
         nxt = crosses[k_ + 1][0]
-        x = nxt + 1                                      # exit via cross: open candle setelah cross berikutnya (tanpa filter)
+        opp = [cj for cj, dd in crosses[k_ + 1:] if dd == -d]   # cross berlawanan berikutnya (kandidat exit profit)
         c1s, ks = acts[d]
         idx = np.flatnonzero((c1s >= ci - (LEVEL_BEFORE - 1)) & (c1s <= ci + LEVEL_AFTER))   # c1 level di jendela
         sel = None; mode = None; e = None
@@ -252,7 +258,7 @@ def build_segments(symbol, df):
         if sel is None:
             stats['filtered'] += 1
             continue
-        if e >= n or x >= n or e >= x:
+        if e >= n:
             continue
         c1 = int(c1s[sel])
         if d == 1:
@@ -263,31 +269,48 @@ def build_segments(symbol, df):
         if (d == 1 and e_px <= sl) or (d == -1 and e_px >= sl):
             stats['sl_invalid'] += 1                     # harga entry sudah di sisi rugi dari SL
             continue
+        if e < busy_until:                               # posisi sebelumnya masih ditahan (rugi, belum kena SL) -> sinyal dilewati
+            stats['busy'] += 1
+            continue
         stats['valid'] += 1
         stats[mode] += 1
 
-        # exit: SL / likuidasi / cross -- mana yang duluan (candle e..x-1; SL dicek juga di candle entry)
+        # exit: SL / likuidasi dicek di SEMUA candle sejak entry. Cross berlawanan HANYA dipakai exit kalau posisi PROFIT
+        # (open candle setelah cross > entry utk Long, < entry utk Short). Kalau rugi, cross itu diabaikan dan posisi
+        # ditahan sampai SL (atau cross berlawanan berikutnya yang profit). Rugi = SL/likuidasi saja.
         if d == 1:
-            sl_hit = l[e:x] <= sl
+            sl_hit = l[e:] <= sl
             liq_px = e_px * (1 - LIQ_PCT)
-            liq_hit = (l[e:x] <= liq_px) if LIQ_PCT > 0 else np.zeros(x - e, dtype=bool)
+            liq_hit = (l[e:] <= liq_px) if LIQ_PCT > 0 else np.zeros(n - e, dtype=bool)
         else:
-            sl_hit = h[e:x] >= sl
+            sl_hit = h[e:] >= sl
             liq_px = e_px * (1 + LIQ_PCT)
-            liq_hit = (h[e:x] >= liq_px) if LIQ_PCT > 0 else np.zeros(x - e, dtype=bool)
+            liq_hit = (h[e:] >= liq_px) if LIQ_PCT > 0 else np.zeros(n - e, dtype=bool)
         sl_idx = e + int(sl_hit.argmax()) if sl_hit.any() else None
         liq_idx = e + int(liq_hit.argmax()) if liq_hit.any() else None
         sl_closer = (sl >= liq_px) if d == 1 else (sl <= liq_px)
+        stop = None
         if sl_idx is not None and (liq_idx is None or sl_idx < liq_idx or (sl_idx == liq_idx and sl_closer)):
-            reason = 'sl'; xi = sl_idx
-            x_px = min(sl, float(o[xi])) if d == 1 else max(sl, float(o[xi]))     # gap: exit di open kalau sudah melewati SL
-            x_ts = int(ts[xi])
+            sx = min(sl, float(o[sl_idx])) if d == 1 else max(sl, float(o[sl_idx]))     # gap: exit di open kalau sudah melewati SL
+            stop = ('sl', sl_idx, sx)
         elif liq_idx is not None:
-            reason = 'liq'; xi = liq_idx; x_px = liq_px; x_ts = int(ts[xi])
-        else:
-            reason = 'cross'; x_px = float(o[x]); x_ts = int(ts[x])
+            stop = ('liq', liq_idx, liq_px)
+        ext = None
+        for cj in opp:                                   # urut waktu; exit di open candle setelah cross
+            xj = cj + 1
+            if xj >= n or (stop is not None and stop[1] <= cj):
+                break                                    # SL/likuidasi sudah kena duluan (termasuk di candle cross)
+            px = float(o[xj])
+            if (d == 1 and px > e_px) or (d == -1 and px < e_px):
+                ext = ('cross', xj, px)
+                break
+        res = ext or stop
+        if res is None:
+            continue                                     # masih terbuka di akhir data -> tidak dihitung
+        reason, xi, x_px = res
+        busy_until = xi if reason == 'cross' else xi + 1
         segs.append({'symbol': symbol, 'dir': d, 'e_ts': int(ts[e]), 'e_px': e_px, 'sl': sl,
-                     'x_ts': x_ts, 'x_px': float(x_px), 'reason': reason})
+                     'x_ts': int(ts[xi]), 'x_px': float(x_px), 'reason': reason})
     return segs, stats
 
 
@@ -427,7 +450,7 @@ def _run():
             n_sl = sum(1 for s in segs if s['reason'] == 'sl')
             n_liq = sum(1 for s in segs if s['reason'] == 'liq')
             _log_msg(f"   {symbol}: {len(df):,} candle, {st['cross']} cross, {st['filtered']} gugur (tanpa level), "
-                     f"{st['sl_invalid']} SL tidak valid, {st['langsung']} entry langsung + {st['tunggu']} entry setelah menunggu; "
+                     f"{st['sl_invalid']} SL tidak valid, {st['busy']} dilewati (posisi masih terbuka), {st['langsung']} entry langsung + {st['tunggu']} entry setelah menunggu; "
                      f"{len(segs)} posisi selesai ({n_sl} SL, {n_liq} likuidasi)")
         _log_msg(f"Simulasi gabungan ({len(all_segs)} posisi)...")
         trades, summ = simulate(all_segs)
@@ -515,7 +538,7 @@ def _render_html():
             f'sebelum cross (candle cross = ke-1) sampai {LEVEL_AFTER} candle setelah cross. FVG sudah selesai saat cross -> entry market saat itu; '
             f'belum -> tunggu FVG selesai lalu entry market; kalau tidak ada, sinyal gugur. '
             f'SL = ujung wick terjauh c1/c2 level (Long: wick bawah, Short: wick atas) digeser {SL_BUFFER_PCT*100:g}% lebih jauh. '
-            f'Tanpa TP; exit via SL, cross berlawanan, atau likuidasi.')
+            f'Tanpa TP; rugi hanya lewat SL/likuidasi, profit lewat cross berlawanan (cross berlawanan saat posisi rugi diabaikan, posisi ditahan sampai SL atau cross berlawanan berikutnya yang profit; sinyal baru selama posisi masih terbuka dilewati).')
 
     css = '''
  body { font-family:-apple-system,Arial,sans-serif; background:#0f1117; color:#e6e6e6; margin:0; padding:20px; }
@@ -539,7 +562,7 @@ def _render_html():
         f'<h1>Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} Cross — H1 + level berFVG + SL</h1>'
         + status + cards +
         '<div class="note">'
-        f'Golden cross Long, death cross tutup &amp; Short (dan sebaliknya). {filt}<br>'
+        f'Golden cross Long, death cross Short; cross berlawanan menutup posisi hanya kalau profit. {filt}<br>'
         f'Risk {RISK_PCT*100:g}% balance PER TRADE (jarak entry–SL), leverage {LEVERAGE:g}x, min order ${MIN_ORDER_USD:g} '
         f'(notional ${ORDER_BUMP_FLOOR:g}–${MIN_ORDER_USD:g} dinaikkan ke minimum, di bawahnya dilewati), '
         f'likuidasi bila harga melawan ±{LIQ_PCT*100:.1f}%. Fee {FEE_ENTRY_PCT*100:.2f}% masuk / {FEE_EXIT_PCT*100:.2f}% keluar. '
