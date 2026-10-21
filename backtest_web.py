@@ -318,7 +318,9 @@ def simulate(all_segs):
     events = []
     for sid, s in enumerate(all_segs):
         events.append((s['e_ts'], 1, sid))               # open
-        events.append((s['x_ts'], 0, sid))               # close (0 duluan di timestamp sama)
+        # close: 0 = sebelum open di timestamp yang sama (membebaskan margin). Kalau exit di candle yang SAMA dengan entry
+        # (SL kena di candle entry) close harus SETELAH open (2), kalau tidak close diabaikan dan margin posisi itu bocor selamanya.
+        events.append((s['x_ts'], 0 if s['x_ts'] > s['e_ts'] else 2, sid))
     events.sort()
     balance = INITIAL_BALANCE
     used = 0.0
