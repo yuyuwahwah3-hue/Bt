@@ -23,11 +23,14 @@ backtest_cross.py — Backtest EMA21/EMA30 cross H1 + level berFVG + SL di wick 
 - UKURAN POSISI: RISK per TRADE = RISK_PCT x balance (5%) -> qty = risk / |entry - SL|. Margin = notional / LEVERAGE (10x).
   Notional < MIN_ORDER_USD ($5): kalau >= ORDER_BUMP_FLOOR ($4) dinaikkan ke $5 (risk sedikit > 5%), kalau lebih kecil setup dilewati.
   Margin terpakai > MARGIN_USAGE_CAP x balance -> setup dilewati.
+- BATAS POSISI SEARAH: maks MAX_SAME_DIR (5) posisi Long dan 5 Short terbuka bersamaan (simulasi gabungan); setup berikutnya dilewati.
+- THROTTLE DRAWDOWN: kalau balance turun >= DD_THROTTLE_PCT (15%) dari puncak, risk per trade x DD_THROTTLE_MULT (0.5) sampai
+  drawdown pulih <= DD_RECOVER_PCT (5%). Set DD_THROTTLE_PCT=0 / MAX_SAME_DIR=0 untuk mematikan.
 - Likuidasi (isolated): harga melawan >= (1/LEVERAGE - LIQ_MMR) dari entry -> margin hilang (kalau SL lebih jauh dari likuidasi).
 - Fee: 0.1% masuk, 0.3% keluar dari nilai posisi. Posisi terbuka di akhir data tidak dihitung.
 - Dua simulasi: GABUNGAN (1 balance bersama) dan PER-KOIN independen (tiap koin modal awal sendiri).
 Env: INITIAL_BALANCE, RISK_PCT, LEVERAGE, MIN_ORDER_USD, ORDER_BUMP_FLOOR, SL_BUFFER_PCT, LEVEL_BEFORE, LEVEL_AFTER, FVG_FIRST_C,
-FVG_LAST_C, EMA_FAST, EMA_SLOW, EMA_WARMUP, FEE_ENTRY_PCT, FEE_EXIT_PCT, LIQ_MMR, MARGIN_USAGE_CAP, BACKTEST_START_DATE,
+FVG_LAST_C, EMA_FAST, EMA_SLOW, EMA_WARMUP, FEE_ENTRY_PCT, FEE_EXIT_PCT, LIQ_MMR, MARGIN_USAGE_CAP, MAX_SAME_DIR, DD_THROTTLE_PCT, DD_RECOVER_PCT, DD_THROTTLE_MULT, BACKTEST_START_DATE,
 BACKTEST_END_DATE, SYMBOLS (pisah koma).
 Start command Railway: python backtest_cross.py
 """
@@ -62,6 +65,10 @@ FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
 LIQ_MMR          = float(os.environ.get('LIQ_MMR', '0.005'))
 LIQ_PCT          = max(0.0, 1.0 / LEVERAGE - LIQ_MMR)
 MARGIN_USAGE_CAP = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
+MAX_SAME_DIR     = int(os.environ.get('MAX_SAME_DIR', 5))                 # maks posisi terbuka searah (5 Long + 5 Short bersamaan); 0 = tanpa batas
+DD_THROTTLE_PCT  = float(os.environ.get('DD_THROTTLE_PCT', '0.15'))       # balance turun >= 15% dari puncak -> risk dikurangi; 0 = throttle mati
+DD_RECOVER_PCT   = float(os.environ.get('DD_RECOVER_PCT', '0.05'))        # throttle dilepas saat drawdown dari puncak <= 5%
+DD_THROTTLE_MULT = float(os.environ.get('DD_THROTTLE_MULT', '0.5'))       # pengali RISK_PCT saat throttle aktif (0.5 -> risk jadi setengah)
 WICK_EPS         = 1e-9
 
 def _default_end_date():
@@ -328,6 +335,10 @@ def simulate(all_segs):
     trades = []
     blocked_margin = 0
     blocked_min = 0
+    blocked_dir = 0
+    n_throttled = 0
+    n_dir = {1: 0, -1: 0}                                # jumlah posisi terbuka per arah
+    throttled = False
     peak = balance
     max_dd = 0.0
     for t, typ, sid in events:
@@ -336,8 +347,11 @@ def simulate(all_segs):
             if balance <= 0:
                 blocked_margin += 1
                 continue
+            if MAX_SAME_DIR > 0 and n_dir[s['dir']] >= MAX_SAME_DIR:
+                blocked_dir += 1                         # sudah ada MAX_SAME_DIR posisi searah -> setup dilewati
+                continue
             dist = abs(s['e_px'] - s['sl'])
-            risk_amt = balance * RISK_PCT                # risk PER TRADE
+            risk_amt = balance * RISK_PCT * (DD_THROTTLE_MULT if throttled else 1.0)   # risk PER TRADE (dikurangi saat throttle)
             qty = risk_amt / dist
             notional = qty * s['e_px']
             if notional < MIN_ORDER_USD:
@@ -353,11 +367,15 @@ def simulate(all_segs):
                 continue
             live[sid] = (qty, margin, dist)
             used += margin
+            n_dir[s['dir']] += 1
+            if throttled:
+                n_throttled += 1
         else:
             if sid not in live:
                 continue
             qty, margin, dist = live.pop(sid)
             used -= margin
+            n_dir[s['dir']] -= 1
             d = s['dir']
             if s['reason'] == 'liq':
                 pnl = -margin
@@ -367,6 +385,12 @@ def simulate(all_segs):
                 pnl = max(gross - fee, -margin)
             balance += pnl
             peak = max(peak, balance)
+            if DD_THROTTLE_PCT > 0 and peak > 0:         # throttle drawdown (hysteresis): aktif di >= DD_THROTTLE_PCT, lepas di <= DD_RECOVER_PCT
+                dd_now = (peak - balance) / peak
+                if not throttled and dd_now >= DD_THROTTLE_PCT:
+                    throttled = True
+                elif throttled and dd_now <= DD_RECOVER_PCT:
+                    throttled = False
             if peak > 0:
                 max_dd = max(max_dd, (peak - balance) / peak * 100)
             r_mult = pnl / (qty * dist) if qty * dist > 0 else 0.0
@@ -383,7 +407,7 @@ def simulate(all_segs):
         'total_r': total_r, 'avg_r': (total_r / n) if n else 0.0,
         'final_balance': balance, 'roi': (balance - INITIAL_BALANCE) / INITIAL_BALANCE * 100,
         'total_pnl': balance - INITIAL_BALANCE, 'max_dd': max_dd,
-        'blocked_margin': blocked_margin, 'blocked_min': blocked_min,
+        'blocked_margin': blocked_margin, 'blocked_min': blocked_min, 'blocked_dir': blocked_dir, 'n_throttled': n_throttled,
         'avg_win': (sum(x['pnl'] for x in trades if x['pnl'] > 0) / wins) if wins else 0.0,
         'avg_loss': (sum(x['pnl'] for x in trades if x['pnl'] <= 0) / (n - wins)) if n - wins else 0.0,
     }
@@ -433,7 +457,8 @@ def _run():
     try:
         _log_msg(f"Backtest EMA{EMA_FAST}/EMA{EMA_SLOW} cross H1 + level berFVG + SL wick c1/c2 (+{SL_BUFFER_PCT*100:g}%) — {len(SYMBOLS)} koin, "
                  f"{BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}; risk {RISK_PCT*100:g}%/trade, leverage {LEVERAGE:g}x, "
-                 f"likuidasi ±{LIQ_PCT*100:.1f}%, c1 level {LEVEL_BEFORE} candle sebelum cross s/d {LEVEL_AFTER} candle setelah cross")
+                 f"likuidasi ±{LIQ_PCT*100:.1f}%, c1 level {LEVEL_BEFORE} candle sebelum cross s/d {LEVEL_AFTER} candle setelah cross; "
+                 f"maks {MAX_SAME_DIR} posisi searah, throttle DD {DD_THROTTLE_PCT*100:g}% (risk x{DD_THROTTLE_MULT:g}, lepas di {DD_RECOVER_PCT*100:g}%)")
         all_segs = []
         segs_by = {}
         for symbol in SYMBOLS:
@@ -461,7 +486,7 @@ def _run():
             _, sm = simulate(sg)
             indep.append({'symbol': sym, 'n': sm['n_trades'], 'wr': sm['wr'], 'sl': sm['n_sl'], 'liq': sm['n_liq'],
                           'total_r': sm['total_r'], 'final': sm['final_balance'], 'roi': sm['roi'], 'max_dd': sm['max_dd'],
-                          'blocked': sm['blocked_margin'] + sm['blocked_min']})
+                          'blocked': sm['blocked_margin'] + sm['blocked_min'] + sm['blocked_dir']})
         indep.sort(key=lambda r: -r['roi'])
 
         with _lock:
@@ -565,7 +590,8 @@ def _render_html():
         f'Risk {RISK_PCT*100:g}% balance PER TRADE (jarak entry–SL), leverage {LEVERAGE:g}x, min order ${MIN_ORDER_USD:g} '
         f'(notional ${ORDER_BUMP_FLOOR:g}–${MIN_ORDER_USD:g} dinaikkan ke minimum, di bawahnya dilewati), '
         f'likuidasi bila harga melawan ±{LIQ_PCT*100:.1f}%. Fee {FEE_ENTRY_PCT*100:.2f}% masuk / {FEE_EXIT_PCT*100:.2f}% keluar. '
-        f'Modal awal ${INITIAL_BALANCE:g}. Setup terlewat (simulasi gabungan): margin {g("blocked_margin")}, di bawah min order {g("blocked_min")}.<br>'
+        f'Modal awal ${INITIAL_BALANCE:g}. Setup terlewat (simulasi gabungan): margin {g("blocked_margin")}, di bawah min order {g("blocked_min")}, posisi searah penuh (maks {MAX_SAME_DIR}) {g("blocked_dir")}. '
+        f'Throttle drawdown: risk x{DD_THROTTLE_MULT:g} saat balance turun >= {DD_THROTTLE_PCT*100:g}% dari puncak sampai pulih ke <= {DD_RECOVER_PCT*100:g}% (dipakai di {g("n_throttled")} trade).<br>'
         '<a href="/trades.csv">/trades.csv</a> | <a href="/logs">/logs</a></div>'
         '<h2>Per Bulan (simulasi gabungan)</h2>'
         f'<div class="note">Rata-rata pertumbuhan: <b class="{cls(avg_g)}">{avg_g:+.1f}% / bulan</b></div>'
