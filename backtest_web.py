@@ -54,7 +54,7 @@ MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))
 ORDER_BUMP_FLOOR = float(os.environ.get('ORDER_BUMP_FLOOR', '4.0'))  # notional antara floor..min order dinaikkan ke min order; di bawah floor dilewati
 SL_BUFFER_PCT    = float(os.environ.get('SL_BUFFER_PCT', '0.00'))    # SL digeser 1% lebih jauh dari ujung wick c1/c2 (pengaman)
 LEVEL_BEFORE     = int(os.environ.get('LEVEL_BEFORE', 5))            # c1 level maks di candle ke-N ke belakang (candle cross = ke-1)
-LEVEL_AFTER      = int(os.environ.get('LEVEL_AFTER', 10))            # c1 level boleh sampai N candle setelah cross
+LEVEL_AFTER      = int(os.environ.get('LEVEL_AFTER', 0))            # c1 level boleh sampai N candle setelah cross
 FVG_FIRST_C      = int(os.environ.get('FVG_FIRST_C', 1))             # 1 -> FVG bisa C1-C3 atau C2-C4 ; 2 -> hanya C2-C4
 FVG_LAST_C       = int(os.environ.get('FVG_LAST_C', 4))              # FVG selesai paling lambat di candle ke-N level (C4)
 EMA_FAST         = int(os.environ.get('EMA_FAST', 21))
