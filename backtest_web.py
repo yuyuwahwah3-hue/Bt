@@ -44,11 +44,11 @@ from pybit.unified_trading import HTTP
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '100.0'))
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))         # risk PER TRADE dari balance (jarak entry-SL)
-LEVERAGE         = float(os.environ.get('LEVERAGE', '15'))
+LEVERAGE         = float(os.environ.get('LEVERAGE', '10'))
 MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))
 ORDER_BUMP_FLOOR = float(os.environ.get('ORDER_BUMP_FLOOR', '4.0'))  # notional antara floor..min order dinaikkan ke min order; di bawah floor dilewati
 SL_BUFFER_PCT    = float(os.environ.get('SL_BUFFER_PCT', '0.00'))    # SL digeser 1% lebih jauh dari ujung wick c1/c2 (pengaman)
-LEVEL_BEFORE     = int(os.environ.get('LEVEL_BEFORE', 8))            # c1 level maks di candle ke-N ke belakang (candle cross = ke-1)
+LEVEL_BEFORE     = int(os.environ.get('LEVEL_BEFORE', 5))            # c1 level maks di candle ke-N ke belakang (candle cross = ke-1)
 LEVEL_AFTER      = int(os.environ.get('LEVEL_AFTER', 10))            # c1 level boleh sampai N candle setelah cross
 FVG_FIRST_C      = int(os.environ.get('FVG_FIRST_C', 1))             # 1 -> FVG bisa C1-C3 atau C2-C4 ; 2 -> hanya C2-C4
 FVG_LAST_C       = int(os.environ.get('FVG_LAST_C', 4))              # FVG selesai paling lambat di candle ke-N level (C4)
@@ -66,7 +66,7 @@ def _default_end_date():
     return datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
 def _default_start_date():
-    return (datetime.now(timezone.utc) - timedelta(days=365)).strftime('%Y-%m-%d')
+    return '2025-01-01'
 
 BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', _default_start_date())
 BACKTEST_END_DATE   = os.environ.get('BACKTEST_END_DATE', _default_end_date())
@@ -75,11 +75,16 @@ CACHE_DIR = os.environ.get('CACHE_DIR', './data_cache')
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 _DEFAULT_SYMBOLS = [
-    'ICPUSDT', 'ENAUSDT', 'LABUSDT', 'USUALUSDT', '1000FLOKIUSDT',
-    'JUPUSDT', 'STRKUSDT', 'WOOUSDT', 'ADAUSDT', 'PENDLEUSDT',
-    '1000BONKUSDT', 'POPCATUSDT', 'IOTAUSDT'
+    'PENDLEUSDT', 'PYTHUSDT', 'BLURUSDT', '1000BONKUSDT', 'WUSDT',
+    'USUALUSDT', 'ETHFIUSDT', 'LABUSDT', 'IOTAUSDT', '1000FLOKIUSDT',
+    'HBARUSDT', 'PLUMEUSDT', 'BERAUSDT', 'MASKUSDT', 'ESPORTSUSDT',
+    'IMXUSDT', 'CRVUSDT', 'ACHUSDT', 'FARTCOINUSDT', 'AEVOUSDT',
+    'ICPUSDT', 'ENAUSDT', 'ADAUSDT', 'WIFUSDT', 'DYDXUSDT',
+    'BATUSDT', 'LRCUSDT', 'IOUSDT', 'BOMEUSDT', 'OPUSDT',
+    'POPCATUSDT', 'WOOUSDT', 'STORJUSDT', 'ROSEUSDT', 'POWRUSDT',
+    'JUPUSDT', 'HUSDT', 'STRKUSDT', 'IOTXUSDT', 'MEWUSDT',
+    'VIRTUALUSDT', 'POLUSDT', 'CKBUSDT', 'ASTRUSDT'
 ]
-
 _sym_env = os.environ.get('SYMBOLS', '').strip()
 SYMBOLS = [s.strip().upper() for s in _sym_env.split(',') if s.strip()] if _sym_env else _DEFAULT_SYMBOLS
 
