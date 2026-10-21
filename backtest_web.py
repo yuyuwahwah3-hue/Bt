@@ -45,7 +45,7 @@ from pybit.unified_trading import HTTP
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '100.0'))
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))         # risk PER TRADE dari balance (jarak entry-SL)
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))         # risk PER TRADE dari balance (jarak entry-SL)
 LEVERAGE         = float(os.environ.get('LEVERAGE', '10'))
 MIN_ORDER_USD    = float(os.environ.get('MIN_ORDER_USD', '5.0'))
 ORDER_BUMP_FLOOR = float(os.environ.get('ORDER_BUMP_FLOOR', '4.0'))  # notional antara floor..min order dinaikkan ke min order; di bawah floor dilewati
