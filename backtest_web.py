@@ -86,7 +86,7 @@ def _default_end_date():
 def _default_start_date():
     d = datetime.now(timezone.utc)
     # mundur 1 tahun kalender dari hari ini
-    return (d - timedelta(days=365)).strftime('%Y-%m-%d')
+    return (d - timedelta(days=565)).strftime('%Y-%m-%d')
 
 BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', _default_start_date())
 BACKTEST_END_DATE   = os.environ.get('BACKTEST_END_DATE', _default_end_date())
