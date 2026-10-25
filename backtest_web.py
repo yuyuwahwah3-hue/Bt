@@ -50,8 +50,8 @@ from pybit.unified_trading import HTTP
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '1000.0'))   # modal awal, 1 akun bersama
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
-FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
-FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
+FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0006'))
+FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
 
 EMA_BIAS_FILTER  = os.environ.get('EMA_BIAS_FILTER', '1').strip() not in ('0', 'false', 'False', '')
 BIAS_EMA_FAST    = int(os.environ.get('BIAS_EMA_FAST', 21))
