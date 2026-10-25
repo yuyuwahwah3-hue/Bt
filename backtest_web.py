@@ -568,7 +568,8 @@ def detect_all_events(df, m5):
 #    gap lama boleh menyusut oleh candle di antaranya asal tidak hilang seluruhnya). IFVG harus terbentuk SETELAH sentuhan.
 #    ENTRY MARKET di close candle IFVG. SL = ujung terjauh dari FVG lama sampai IFVG +NS_SL_BUF (0.2%). TP = titik BOS terkunci.
 # 8) Setelah SL: tunggu acuan lain yang belum tersentuh. Setup SELESAI kalau TP; BOS USAI kalau setelah acuan tersentuh harga
-#    kembali ke titik BOS terkunci (sebelum/ sesudah entry-SL); setup MATI kalau close H1 menembus level asli lagi.
+#    kembali ke titik BOS terkunci (sebelum/ sesudah entry-SL); setup MATI kalau (setelah BOS) close H1 menembus titik terjauh antara break-out dan break-in
+#    (Long: low terendah bo..bi; Short: high tertinggi bo..bi).
 # Catatan: urutan trade dalam 1 setup dihitung dari harga saja (tanpa balance); simulasi gabungan di bawah tetap menerapkan
 # slot/margin/min-order/1-posisi-per-arah, jadi entry yg terblokir cuma dilewati.
 
@@ -658,6 +659,9 @@ def ns_setups(H1, M5, LV, st):
         else:
             st['no_fvg'] += 1; continue
         ext = float(h[i:bo].max()) if sup else float(l[i:bo].min())
+        # titik terjauh ANTARA break-out dan break-in (low terendah utk Long / high tertinggi utk Short), inklusif bo..bi.
+        # Dipakai sebagai batas gugur setelah BOS: close H1 menembus titik ini -> setup mati.
+        dz = float(l[bo:bi + 1].min()) if sup else float(h[bo:bi + 1].max())
         beyond = (lambda p: p > ext) if sup else (lambda p: p < ext)
         bos = None; cancelled = None; swept = False
         if beyond(c[bi]):
@@ -681,7 +685,7 @@ def ns_setups(H1, M5, LV, st):
             continue
         st['bos'] += 1
         out.append({'sup': sup, 'ty': lv['ty'], 'd': lv['d'], 'L': lvl, 'i': i, 'bo': bo, 'bi': bi, 'bos': bos,
-                    'ext': ext, 'vf': max(vf, vf0)})
+                    'ext': ext, 'dz': dz, 'vf': max(vf, vf0)})
     return out
 
 
@@ -708,7 +712,7 @@ def _ns_overlap(pl, ph, pj, k, zl, zh, L5, H5):
 def ns_chain(S, LV, X):
     """Satu setup (sudah BOS) -> urutan trade (harga saja) + status akhir.
     X = array konteks M5/H1 (lihat ns_detect_events). Return (trades, status)."""
-    sup = S['sup']; lvl = S['L']; i = S['i']; bi = S['bi']; bos = S['bos']; ext = S['ext']
+    sup = S['sup']; lvl = S['L']; i = S['i']; bi = S['bi']; bos = S['bos']; ext = S['ext']; dz = S['dz']
     ts5, H5, L5, C5, O5 = X['ts5'], X['H5'], X['L5'], X['C5'], X['O5']
     hts, hh, hl, hc, lm5 = X['hts'], X['hh'], X['hl'], X['hc'], X['lm5']
     bull, bear = X['bull'], X['bear']
@@ -734,7 +738,7 @@ def ns_chain(S, LV, X):
     if s0 >= n5:
         return [], 'pending'
     a_bos = int(np.searchsorted(ts5, hts[bos]))
-    dead_arr = (hc < lvl) if sup else (hc > lvl)              # close H1 menembus level asli lagi
+    dead_arr = (hc < dz) if sup else (hc > dz)                # close H1 menembus titik terjauh antara break-out & break-in
     dm5 = lm5[np.flatnonzero(dead_arr)]
     def next_death(j):
         p = int(np.searchsorted(dm5, j))
