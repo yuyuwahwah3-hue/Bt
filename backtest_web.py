@@ -563,11 +563,13 @@ def detect_all_events(df, m5):
 # 6) ACUAN = semua level baru berFVG sejenis (definisi level no.1) yang terbentuk setelah break-in dan berada di range harga
 #    antara level yang dibreak dan titik terjauh (NS_RANGE_MODE=melebar: batas ikut melebar mengikuti titik terjauh berjalan
 #    sampai level baru itu selesai; =tetap: batas = titik terjauh saat BOS). Acuan aktif setelah candle ke-4 level barunya closed.
-# 7) MONITORING M5 (tanpa expired): acuan di-BREAK candle H1 (close menembus acuan, bukan sekadar tersentuh di M5) -> titik BOS (high tertinggi / low terendah sejak BOS)
+#    HANYA acuan yang terbentuk PERTAMA setelah break-in yang dipakai ENTRY; acuan lain cuma mengunci titik BOS (kalau kena lalu harga
+#    kembali ke titik BOS -> BOS gugur tanpa entry).
+# 7) MONITORING M5 (tanpa expired): acuan TERSENTUH di M5 (wick boleh; semua acuan, entry maupun lainnya) -> titik BOS (high tertinggi / low terendah sejak BOS)
 #    DIKUNCI. Cari IFVG: FVG M5 searah trade yang menimpa gap FVG M5 lawan (boleh dari NS_LOOKBACK=20 candle sebelum sentuhan;
 #    gap lama boleh menyusut oleh candle di antaranya asal tidak hilang seluruhnya). IFVG harus terbentuk SETELAH sentuhan.
 #    ENTRY MARKET di close candle IFVG. SL = ujung terjauh dari FVG lama sampai IFVG +NS_SL_BUF (0.2%). TP = titik BOS terkunci.
-# 8) Setelah SL: tunggu acuan lain yang belum tersentuh. Setup SELESAI kalau TP; BOS USAI kalau setelah acuan tersentuh harga
+# 8) Setelah SL setup selesai (1 acuan entry per setup). Setup SELESAI kalau TP; BOS USAI kalau setelah acuan tersentuh harga
 #    kembali ke titik BOS terkunci (sebelum/ sesudah entry-SL); setup MATI kalau (setelah BOS) close H1 menembus titik terjauh antara break-out dan break-in
 #    (Long: low terendah bo..bi; Short: high tertinggi bo..bi).
 # Catatan: urutan trade dalam 1 setup dihitung dari harga saja (tanpa balance); simulasi gabungan di bawah tetap menerapkan
@@ -720,7 +722,7 @@ def ns_chain(S, LV, X):
     seen0 = max(int(hts[bos]) + H1_MS, S['vf'])
     s0 = int(np.searchsorted(ts5, seen0))
     # --- semua level acuan dalam range ---
-    acs = []
+    acs = []; entry_A = None; entry_c1 = None
     for x in LV:
         if x['ty'] != S['ty'] or x['c1'] <= bi:
             continue
@@ -732,6 +734,8 @@ def ns_chain(S, LV, X):
         if ((lvl <= x['L'] <= rext) if sup else (rext <= x['L'] <= lvl)):
             av = max(int(hts[c4]) + H1_MS, seen0)
             acs.append((int(np.searchsorted(ts5, av)), x['L']))
+            if entry_c1 is None or x['c1'] < entry_c1:      # acuan ENTRY = yang terbentuk PERTAMA setelah break-in
+                entry_c1 = x['c1']; entry_A = x['L']
     acs.sort()
     if not acs:
         return [], 'tanpa_acuan'
@@ -756,35 +760,35 @@ def ns_chain(S, LV, X):
                 if seg.any():
                     tl = j + int(seg.argmax())
         best_t = None
-        nh = len(hc)
         for av, A in acs:
-            if A in used or av >= end or av >= n5:
+            if A in used or av >= end:
                 continue
-            # acuan 'break' = candle H1 yang CLOSE menembus acuan (bukan cuma tersentuh di M5); candle harus mulai setelah
-            # acuan aktif dan selesai (closed) pada/ setelah j. Titik break = candle M5 terakhir dari candle H1 itu.
-            kst = max(int(np.searchsorted(hts, ts5[av])), int(np.searchsorted(lm5, j)))
-            if kst >= nh:
+            s = max(j, av)
+            lim = end if best_t is None else min(end, best_t + 1)
+            if s >= lim:
                 continue
-            cond = (hc[kst:] < A) if sup else (hc[kst:] > A)
-            if not cond.any():
-                continue
-            t = int(lm5[kst + int(cond.argmax())])
-            if t >= end or t >= n5:
-                continue
-            if best_t is None or t < best_t:
-                best_t = t
+            seg = (L5[s:lim] <= A) if sup else (H5[s:lim] >= A)
+            if seg.any():
+                t = s + int(seg.argmax())
+                if best_t is None or t < best_t:
+                    best_t = t
         if tl is not None and (best_t is None or tl <= best_t):
             status = 'bos_selesai'; break
         if best_t is None:
             status = 'level_ditembus_lagi' if dead_idx < n5 else 'pending'; break
-        kk_ = int(np.searchsorted(lm5, best_t))      # candle H1 yang menutup di best_t
-        touched = [A for av, A in acs if A not in used and av <= best_t and hts[kk_] >= ts5[av] and ((hc[kk_] < A) if sup else (hc[kk_] > A))]
+        touched = [A for av, A in acs if A not in used and av <= best_t and ((L5[best_t] <= A) if sup else (H5[best_t] >= A))]
         for A in touched:
             used.add(A)
         tj0 = best_t
         BE = locked if locked is not None else float(H5[a_bos:tj0 + 1].max() if sup else L5[a_bos:tj0 + 1].min())
         if locked is None:
             locked = BE
+        if entry_A not in touched:
+            # acuan lain (bukan acuan pertama) yang tersentuh: hanya mengunci titik BOS (dipakai utk menggugurkan BOS), tanpa entry
+            j = tj0 + 1
+            if j >= n5:
+                status = 'pending'; break
+            continue
         q0 = tj0 + 1
         cancel_idx = n5
         if q0 < n5:
@@ -838,10 +842,8 @@ def ns_chain(S, LV, X):
         if si >= n5 and ti >= n5:
             tr.update(why='Open', z=n5 - 1); trades.append(tr); status = 'terbuka'; break
         if si <= ti:
-            tr.update(why='SL', z=si); trades.append(tr); j = si + 1
-            if j >= n5:
-                status = 'pending'; break
-            continue
+            tr.update(why='SL', z=si); trades.append(tr)
+            status = 'selesai_SL'; break          # hanya 1 acuan entry per setup -> setelah SL setup selesai
         tr.update(why='TP', z=ti); trades.append(tr); status = 'selesai_TP'; break
     return trades, status
 
@@ -1414,8 +1416,8 @@ def _render_html() -> bytes:
     <b>Break-out</b> = close H1 menembus keluar, <b>break-in</b> = close H1 kembali (candle yang cuma menyentuh dengan wick wajib diikuti candle break, kalau tidak batal).
     <br>• <b>Titik terjauh</b> (high tertinggi/low terendah c1 s/d sebelum break-out) harus swing {NS_SWING_EXT} kiri-kanan; wajib ada FVG di sekitar break-in (atau break-out);
     <b>BOS</b> = close H1 melewati titik terjauh. Batal kalau sebelum BOS terjadi breakout ulang atau sweep titik terjauh lalu menyentuh level lagi.
-    <br>• <b>Acuan</b> = semua level baru berFVG sejenis yang terbentuk setelah break-in dan berada di range harga level dibreak s/d titik terjauh
-    (range {'melebar mengikuti titik terjauh berjalan' if NS_RANGE_MELEBAR else 'tetap sampai titik terjauh saat BOS'}). Acuan harus di-break candle H1 (close menembus, bukan cuma tersentuh di M5) &rarr; titik BOS dikunci &rarr; cari <b>IFVG</b>
+    <br>• <b>Acuan</b> = semua level baru berFVG sejenis yang terbentuk setelah break-in dan berada di range harga level dibreak s/d titik terjauh; hanya yang <b>terbentuk pertama</b> dipakai entry, yang lain hanya mengunci/menggugurkan BOS
+    (range {'melebar mengikuti titik terjauh berjalan' if NS_RANGE_MELEBAR else 'tetap sampai titik terjauh saat BOS'}). Acuan cukup tersentuh di M5 (wick boleh) &rarr; titik BOS dikunci &rarr; cari <b>IFVG</b>
     (FVG searah menimpa gap FVG lawan, boleh dari {NS_LOOKBACK} candle M5 sebelum sentuh, gap lama boleh menyusut) &rarr; <b>entry market</b> di close IFVG.
     <br>• <b>SL</b> = ujung terjauh FVG lama s/d IFVG {('+' + format(NS_SL_BUF*100, '.2f') + '%')} ; <b>TP</b> = titik BOS terkunci. Setelah SL tunggu acuan lain; setup selesai kalau TP,
     BOS usai kalau harga kembali ke titik BOS setelah acuan tersentuh, mati kalau close H1 menembus level asli lagi. <b>Tanpa expired.</b>
@@ -1613,7 +1615,7 @@ def _fmt_setup_t(ts_ms):
 
 
 _SETUP_NOTE = {
-    'level_ditembus_lagi': 'level ditembus lagi', 'selesai_TP': '', 'pending': 'acuan belum tersentuh / belum ada entry',
+    'level_ditembus_lagi': 'level ditembus lagi', 'selesai_TP': '', 'pending': 'acuan belum tersentuh / belum ada entry', 'selesai_SL': '',
     'tanpa_acuan': 'tidak ada level acuan dalam range', 'terbuka': 'posisi masih terbuka',
     'gugur_ke_titik_BOS': 'gugur: harga lanjut ke titik BOS', 'bos_selesai': 'BOS usai: harga kembali ke titik BOS setelah acuan tersentuh',
 }
