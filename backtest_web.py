@@ -563,15 +563,13 @@ def detect_all_events(df, m5):
 # 6) ACUAN = semua level baru berFVG sejenis (definisi level no.1) yang terbentuk setelah break-in dan berada di range harga
 #    antara level yang dibreak dan titik terjauh (NS_RANGE_MODE=melebar: batas ikut melebar mengikuti titik terjauh berjalan
 #    sampai level baru itu selesai; =tetap: batas = titik terjauh saat BOS). Acuan aktif setelah candle ke-4 level barunya closed.
-#    HANYA acuan yang terbentuk PERTAMA setelah break-in yang dipakai ENTRY; acuan lain cuma mengunci titik BOS (kalau kena lalu harga
-#    kembali ke titik BOS -> BOS gugur tanpa entry). Sentuhan acuan entry = ujung wick level; acuan LAIN = tepi gap FVG-nya
-#    (low candle ke-3 FVG utk Long / high utk Short; kalau ada 2 FVG, yang paling dekat harga).
-# 7) MONITORING M5 (tanpa expired): acuan TERSENTUH di M5 (wick boleh; semua acuan, entry maupun lainnya) -> titik BOS (high tertinggi / low terendah sejak BOS)
-#    DIKUNCI. Cari IFVG: FVG M5 searah trade yang menimpa gap FVG M5 lawan (boleh dari NS_LOOKBACK=20 candle sebelum sentuhan;
-#    gap lama boleh menyusut oleh candle di antaranya asal tidak hilang seluruhnya). IFVG harus terbentuk SETELAH sentuhan.
-#    ENTRY MARKET di close candle IFVG. SL = ujung terjauh dari FVG lama sampai IFVG +NS_SL_BUF (0.2%). TP = titik BOS terkunci.
-# 8) Setelah SL setup selesai (1 acuan entry per setup). Setup SELESAI kalau TP; BOS USAI kalau setelah acuan tersentuh harga
-#    kembali ke titik BOS terkunci (sebelum/ sesudah entry-SL); setup MATI kalau (setelah BOS) close H1 menembus titik terjauh antara break-out dan break-in
+#    SEMUA acuan dipakai. Acuan sentuh pertama di M5 (wick boleh) -> titik BOS (high tertinggi / low terendah sejak BOS) DIKUNCI.
+# 7) ENTRY per acuan, tanpa monitoring M5/IFVG: acuan harus di-BREAK-OUT lalu di-BREAK-IN oleh candle H1 (close menembus keluar lalu
+#    close kembali; aturan wick sama dgn level utama: candle yg cuma wick wajib diikuti candle break, kalau tidak acuan itu batal;
+#    candle break-out harus mulai setelah acuan aktif). ENTRY MARKET di close candle H1 break-in.
+#    SL = ujung terjauh antara break-out s/d break-in acuan (low terendah / high tertinggi, inklusif) +NS_SL_BUF. TP = titik BOS terkunci.
+# 8) Setelah SL tunggu acuan lain yang break-in-nya terjadi sesudahnya. Setup SELESAI kalau TP; BOS USAI kalau harga kembali ke titik BOS
+#    terkunci sebelum entry berikutnya; setup MATI kalau (setelah BOS) close H1 menembus titik terjauh antara break-out dan break-in LEVEL UTAMA
 #    (Long: low terendah bo..bi; Short: high tertinggi bo..bi).
 # Catatan: urutan trade dalam 1 setup dihitung dari harga saja (tanpa balance); simulasi gabungan di bawah tetap menerapkan
 # slot/margin/min-order/1-posisi-per-arah, jadi entry yg terblokir cuma dilewati.
@@ -725,7 +723,7 @@ def ns_chain(S, LV, X):
     seen0 = max(int(hts[bos]) + H1_MS, S['vf'])
     s0 = int(np.searchsorted(ts5, seen0))
     # --- semua level acuan dalam range ---
-    acs = []; entry_A = None; entry_c1 = None
+    acs = []
     for x in LV:
         if x['ty'] != S['ty'] or x['c1'] <= bi:
             continue
@@ -736,11 +734,7 @@ def ns_chain(S, LV, X):
             rext = ext
         if ((lvl <= x['L'] <= rext) if sup else (rext <= x['L'] <= lvl)):
             av = max(int(hts[c4]) + H1_MS, seen0)
-            acs.append((int(np.searchsorted(ts5, av)), x['L'], x['fz']))
-            if entry_c1 is None or x['c1'] < entry_c1:      # acuan ENTRY = yang terbentuk PERTAMA setelah break-in
-                entry_c1 = x['c1']; entry_A = x['L']
-    # batas sentuh: acuan entry = ujung wick level; acuan lain = tepi gap FVG-nya (low candle ke-3 FVG utk Long / high utk Short)
-    acs = [(av, A, (A if A == entry_A else fz)) for av, A, fz in acs]
+            acs.append((int(np.searchsorted(ts5, av)), x['L']))
     acs.sort()
     if not acs:
         return [], 'tanpa_acuan'
@@ -753,87 +747,71 @@ def ns_chain(S, LV, X):
         p = int(np.searchsorted(dm5, j))
         return int(dm5[p]) if p < len(dm5) else n5
 
-    trades = []; used = set(); locked = None; j = s0; status = 'pending'
+    # --- tiap acuan: break-out lalu break-in oleh candle H1 (aturan wick sama dgn level utama) -> ENTRY MARKET di close candle break-in ---
+    nh = len(hc)
+    cands = []                                    # (idx M5 close candle break-in, acuan, k break-out, k break-in, ujung terjauh bo..bi)
+    tj_lock = None                                # sentuhan M5 pertama ke salah satu acuan -> titik BOS dikunci
+    for av, A in acs:
+        if av >= n5:
+            continue
+        sl_ = max(s0, av)
+        if sl_ < n5:
+            sg = (L5[sl_:] <= A) if sup else (H5[sl_:] >= A)
+            if sg.any():
+                t0 = sl_ + int(sg.argmax())
+                if tj_lock is None or t0 < tj_lock:
+                    tj_lock = t0
+        hk0 = int(np.searchsorted(hts, ts5[av]))
+        if sup:
+            tf_o, bf_o, tf_i, bf_i = (hl <= A), (hc < A), (hh >= A), (hc > A)
+        else:
+            tf_o, bf_o, tf_i, bf_i = (hh >= A), (hc > A), (hl <= A), (hc < A)
+        bo_a = _ns_first_break(hk0, nh, tf_o, bf_o)
+        if bo_a is None or bo_a == -1:
+            continue
+        bi_a = _ns_first_break(bo_a + 1, nh, tf_i, bf_i)
+        if bi_a is None or bi_a == -1:
+            continue
+        e_idx = int(lm5[bi_a])
+        if e_idx >= n5:
+            continue
+        zext = float(hl[bo_a:bi_a + 1].min()) if sup else float(hh[bo_a:bi_a + 1].max())
+        cands.append((e_idx, A, bo_a, bi_a, zext))
+    cands.sort()
+    if tj_lock is None:
+        return [], 'pending'
+    BE = float(H5[a_bos:tj_lock + 1].max() if sup else L5[a_bos:tj_lock + 1].min())
+
+    trades = []; used = set(); j = s0; status = 'pending'
     while True:
         dead_idx = next_death(j)
         end = min(dead_idx, n5)
+        jj = max(j, tj_lock + 1)
+        e2 = min(dead_idx + 1, n5)
         tl = None
-        if locked is not None:
-            e2 = min(dead_idx + 1, n5)
-            if j < e2:
-                seg = (H5[j:e2] >= locked) if sup else (L5[j:e2] <= locked)
-                if seg.any():
-                    tl = j + int(seg.argmax())
-        best_t = None
-        for av, A, T in acs:
-            if A in used or av >= end:
-                continue
-            s = max(j, av)
-            lim = end if best_t is None else min(end, best_t + 1)
-            if s >= lim:
-                continue
-            seg = (L5[s:lim] <= T) if sup else (H5[s:lim] >= T)
+        if jj < e2:
+            seg = (H5[jj:e2] >= BE) if sup else (L5[jj:e2] <= BE)
             if seg.any():
-                t = s + int(seg.argmax())
-                if best_t is None or t < best_t:
-                    best_t = t
-        if tl is not None and (best_t is None or tl <= best_t):
-            status = 'bos_selesai'; break
-        if best_t is None:
-            status = 'level_ditembus_lagi' if dead_idx < n5 else 'pending'; break
-        touched = [A for av, A, T in acs if A not in used and av <= best_t and ((L5[best_t] <= T) if sup else (H5[best_t] >= T))]
-        for A in touched:
-            used.add(A)
-        tj0 = best_t
-        BE = locked if locked is not None else float(H5[a_bos:tj0 + 1].max() if sup else L5[a_bos:tj0 + 1].min())
-        if locked is None:
-            locked = BE
-        if entry_A not in touched:
-            # acuan lain (bukan acuan pertama) yang tersentuh: hanya mengunci titik BOS (dipakai utk menggugurkan BOS), tanpa entry
-            j = tj0 + 1
-            if j >= n5:
-                status = 'pending'; break
-            continue
-        q0 = tj0 + 1
-        cancel_idx = n5
-        if q0 < n5:
-            seg = (H5[q0:] >= BE) if sup else (L5[q0:] <= BE)
-            if seg.any():
-                cancel_idx = q0 + int(seg.argmax())
-        dead2 = next_death(q0)
-        stop = min(cancel_idx, dead2)
-        trig = None
-        if stop > tj0 + 2:
-            cand = np.flatnonzero((bull if sup else bear)[tj0 + 2:stop]) + tj0 + 2
-            plo = max(tj0 - NS_LOOKBACK, 0) + 2
-            oppf = bear if sup else bull
-            for q in cand:
-                q = int(q); k = q - 2
-                zl, zh = (H5[k], L5[q]) if sup else (H5[q], L5[k])
-                prevs = np.flatnonzero(oppf[plo:q]) + plo
-                for p in prevs[::-1]:
-                    p = int(p); kp = p - 2
-                    pl, ph = (H5[p], L5[kp]) if sup else (H5[kp], L5[p])
-                    if _ns_overlap(pl, ph, p, k, zl, zh, L5, H5):
-                        entry = float(C5[q])
-                        if sup:
-                            slv = float(L5[kp:q + 1].min()) * (1 - NS_SL_BUF); ok = slv < entry < BE
-                        else:
-                            slv = float(H5[kp:q + 1].max()) * (1 + NS_SL_BUF); ok = BE < entry < slv
-                        if ok:
-                            trig = (q, entry, slv)
-                        break
-                if trig:
-                    break
-        if trig is None:
-            if cancel_idx <= dead2 and cancel_idx < n5:
-                status = 'gugur_ke_titik_BOS'
-            elif dead2 < n5:
-                status = 'level_ditembus_lagi'
+                tl = jj + int(seg.argmax())
+        pick = None
+        for e_idx, A, bo_a, bi_a, zext in cands:
+            if A in used or e_idx < j or e_idx >= end:
+                continue
+            entry = float(hc[bi_a])
+            if sup:
+                slv = zext * (1 - NS_SL_BUF); ok = slv < entry < BE
             else:
-                status = 'pending'
+                slv = zext * (1 + NS_SL_BUF); ok = BE < entry < slv
+            if not ok:
+                used.add(A); continue
+            pick = (e_idx, A, bo_a, entry, slv)
             break
-        q, entry, slv = trig; tp = BE
+        if tl is not None and (pick is None or tl <= pick[0]):
+            status = 'bos_selesai'; break
+        if pick is None:
+            status = 'level_ditembus_lagi' if dead_idx < n5 else 'pending'; break
+        q, A, bo_a, entry, slv = pick
+        used.add(A); tp = BE
         if q + 1 >= n5:
             status = 'pending'; break
         if sup:
@@ -842,13 +820,14 @@ def ns_chain(S, LV, X):
             sg_ = H5[q + 1:] >= slv; tg_ = L5[q + 1:] <= tp
         si = q + 1 + int(sg_.argmax()) if sg_.any() else n5
         ti = q + 1 + int(tg_.argmax()) if tg_.any() else n5
-        tr = {'touch': tj0, 'q': q, 'entry': entry, 'sl': slv, 'tp': tp,
-              'acuan': entry_A}
+        tr = {'touch': int(lm5[bo_a]), 'q': q, 'entry': entry, 'sl': slv, 'tp': tp, 'acuan': A}
         if si >= n5 and ti >= n5:
             tr.update(why='Open', z=n5 - 1); trades.append(tr); status = 'terbuka'; break
         if si <= ti:
-            tr.update(why='SL', z=si); trades.append(tr)
-            status = 'selesai_SL'; break          # hanya 1 acuan entry per setup -> setelah SL setup selesai
+            tr.update(why='SL', z=si); trades.append(tr); j = si + 1
+            if j >= n5:
+                status = 'pending'; break
+            continue
         tr.update(why='TP', z=ti); trades.append(tr); status = 'selesai_TP'; break
     return trades, status
 
@@ -1421,11 +1400,11 @@ def _render_html() -> bytes:
     <b>Break-out</b> = close H1 menembus keluar, <b>break-in</b> = close H1 kembali (candle yang cuma menyentuh dengan wick wajib diikuti candle break, kalau tidak batal).
     <br>• <b>Titik terjauh</b> (high tertinggi/low terendah c1 s/d sebelum break-out) harus swing {NS_SWING_EXT} kiri-kanan; wajib ada FVG di sekitar break-in (atau break-out);
     <b>BOS</b> = close H1 melewati titik terjauh. Batal kalau sebelum BOS terjadi breakout ulang atau sweep titik terjauh lalu menyentuh level lagi.
-    <br>• <b>Acuan</b> = semua level baru berFVG sejenis yang terbentuk setelah break-in dan berada di range harga level dibreak s/d titik terjauh; hanya yang <b>terbentuk pertama</b> dipakai entry, yang lain hanya mengunci/menggugurkan BOS
-    (range {'melebar mengikuti titik terjauh berjalan' if NS_RANGE_MELEBAR else 'tetap sampai titik terjauh saat BOS'}). Acuan cukup tersentuh di M5 (wick boleh) &rarr; titik BOS dikunci &rarr; cari <b>IFVG</b>
-    (FVG searah menimpa gap FVG lawan, boleh dari {NS_LOOKBACK} candle M5 sebelum sentuh, gap lama boleh menyusut) &rarr; <b>entry market</b> di close IFVG.
-    <br>• <b>SL</b> = ujung terjauh FVG lama s/d IFVG {('+' + format(NS_SL_BUF*100, '.2f') + '%')} ; <b>TP</b> = titik BOS terkunci. Setelah SL tunggu acuan lain; setup selesai kalau TP,
-    BOS usai kalau harga kembali ke titik BOS setelah acuan tersentuh, mati kalau close H1 menembus level asli lagi. <b>Tanpa expired.</b>
+    <br>• <b>Acuan</b> = semua level baru berFVG sejenis yang terbentuk setelah break-in dan berada di range harga level dibreak s/d titik terjauh
+    (range {'melebar mengikuti titik terjauh berjalan' if NS_RANGE_MELEBAR else 'tetap sampai titik terjauh saat BOS'}). Sentuhan M5 pertama ke salah satu acuan &rarr; titik BOS dikunci.
+    Tiap acuan harus di-<b>break-out</b> lalu <b>break-in</b> oleh candle H1 (close) &rarr; <b>entry market</b> di close candle break-in, tanpa monitoring M5.
+    <br>• <b>SL</b> = ujung terjauh antara break-out s/d break-in acuan {('+' + format(NS_SL_BUF*100, '.2f') + '%')} ; <b>TP</b> = titik BOS terkunci. Setelah SL tunggu acuan lain; setup selesai kalau TP,
+    BOS usai kalau harga kembali ke titik BOS sebelum entry, mati kalau close H1 menembus titik terjauh antara break-out &amp; break-in level utama. <b>Tanpa expired.</b>
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}. Fee masuk {FEE_ENTRY_PCT*100:.3f}% / keluar {FEE_EXIT_PCT*100:.3f}%.
     <br>Level: {ns.get('levels',0)} &bull; break-out+in: {ns.get('break_out_in',0)} (batal wick keluar/masuk: {ns.get('wick_batal_keluar',0)}/{ns.get('wick_batal_masuk',0)};
     bukan swing: {ns.get('terjauh_bukan_swing',0)}; tanpa FVG: {ns.get('no_fvg',0)}) &bull; BOS: {ns.get('bos',0)} (batal sebelum BOS: {ns.get('batal_sebelum_bos',0)}) &bull;
@@ -1578,8 +1557,8 @@ def _hasil_str(t):
 
 CSV_COLUMNS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Touch', 'IFVG selesai', 'Limit IFVG', 'Fill', 'SL',
                'Fill time', 'Exit', 'Exit time']
-CSV_COLUMNS_NS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Break out', 'Break in', 'Terjauh', 'BOS', 'Acuan', 'Touch acuan',
-                  'IFVG selesai', 'Entry', 'SL', 'TP', 'Entry time', 'Exit', 'Exit time']
+CSV_COLUMNS_NS = ['Koin', 'Dir', 'Hasil', 'Level', 'Terbentuk', 'Break out', 'Break in', 'Terjauh', 'BOS', 'Acuan', 'Break out acuan',
+                  'Break in acuan', 'Entry', 'SL', 'TP', 'Entry time', 'Exit', 'Exit time']
 
 
 def _trades_csv() -> bytes:
