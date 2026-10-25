@@ -563,7 +563,7 @@ def detect_all_events(df, m5):
 # 6) ACUAN = semua level baru berFVG sejenis (definisi level no.1) yang terbentuk setelah break-in dan berada di range harga
 #    antara level yang dibreak dan titik terjauh (NS_RANGE_MODE=melebar: batas ikut melebar mengikuti titik terjauh berjalan
 #    sampai level baru itu selesai; =tetap: batas = titik terjauh saat BOS). Acuan aktif setelah candle ke-4 level barunya closed.
-# 7) MONITORING M5 (tanpa expired): acuan disentuh (wick boleh) -> titik BOS (high tertinggi / low terendah sejak BOS)
+# 7) MONITORING M5 (tanpa expired): acuan di-BREAK candle H1 (close menembus acuan, bukan sekadar tersentuh di M5) -> titik BOS (high tertinggi / low terendah sejak BOS)
 #    DIKUNCI. Cari IFVG: FVG M5 searah trade yang menimpa gap FVG M5 lawan (boleh dari NS_LOOKBACK=20 candle sebelum sentuhan;
 #    gap lama boleh menyusut oleh candle di antaranya asal tidak hilang seluruhnya). IFVG harus terbentuk SETELAH sentuhan.
 #    ENTRY MARKET di close candle IFVG. SL = ujung terjauh dari FVG lama sampai IFVG +NS_SL_BUF (0.2%). TP = titik BOS terkunci.
@@ -756,23 +756,29 @@ def ns_chain(S, LV, X):
                 if seg.any():
                     tl = j + int(seg.argmax())
         best_t = None
+        nh = len(hc)
         for av, A in acs:
-            if A in used or av >= end:
+            if A in used or av >= end or av >= n5:
                 continue
-            s = max(j, av)
-            lim = end if best_t is None else min(end, best_t + 1)
-            if s >= lim:
+            # acuan 'break' = candle H1 yang CLOSE menembus acuan (bukan cuma tersentuh di M5); candle harus mulai setelah
+            # acuan aktif dan selesai (closed) pada/ setelah j. Titik break = candle M5 terakhir dari candle H1 itu.
+            kst = max(int(np.searchsorted(hts, ts5[av])), int(np.searchsorted(lm5, j)))
+            if kst >= nh:
                 continue
-            seg = (L5[s:lim] <= A) if sup else (H5[s:lim] >= A)
-            if seg.any():
-                t = s + int(seg.argmax())
-                if best_t is None or t < best_t:
-                    best_t = t
+            cond = (hc[kst:] < A) if sup else (hc[kst:] > A)
+            if not cond.any():
+                continue
+            t = int(lm5[kst + int(cond.argmax())])
+            if t >= end or t >= n5:
+                continue
+            if best_t is None or t < best_t:
+                best_t = t
         if tl is not None and (best_t is None or tl <= best_t):
             status = 'bos_selesai'; break
         if best_t is None:
             status = 'level_ditembus_lagi' if dead_idx < n5 else 'pending'; break
-        touched = [A for av, A in acs if A not in used and av <= best_t and ((L5[best_t] <= A) if sup else (H5[best_t] >= A))]
+        kk_ = int(np.searchsorted(lm5, best_t))      # candle H1 yang menutup di best_t
+        touched = [A for av, A in acs if A not in used and av <= best_t and hts[kk_] >= ts5[av] and ((hc[kk_] < A) if sup else (hc[kk_] > A))]
         for A in touched:
             used.add(A)
         tj0 = best_t
@@ -1409,7 +1415,7 @@ def _render_html() -> bytes:
     <br>• <b>Titik terjauh</b> (high tertinggi/low terendah c1 s/d sebelum break-out) harus swing {NS_SWING_EXT} kiri-kanan; wajib ada FVG di sekitar break-in (atau break-out);
     <b>BOS</b> = close H1 melewati titik terjauh. Batal kalau sebelum BOS terjadi breakout ulang atau sweep titik terjauh lalu menyentuh level lagi.
     <br>• <b>Acuan</b> = semua level baru berFVG sejenis yang terbentuk setelah break-in dan berada di range harga level dibreak s/d titik terjauh
-    (range {'melebar mengikuti titik terjauh berjalan' if NS_RANGE_MELEBAR else 'tetap sampai titik terjauh saat BOS'}). Acuan disentuh di M5 (wick boleh) &rarr; titik BOS dikunci &rarr; cari <b>IFVG</b>
+    (range {'melebar mengikuti titik terjauh berjalan' if NS_RANGE_MELEBAR else 'tetap sampai titik terjauh saat BOS'}). Acuan harus di-break candle H1 (close menembus, bukan cuma tersentuh di M5) &rarr; titik BOS dikunci &rarr; cari <b>IFVG</b>
     (FVG searah menimpa gap FVG lawan, boleh dari {NS_LOOKBACK} candle M5 sebelum sentuh, gap lama boleh menyusut) &rarr; <b>entry market</b> di close IFVG.
     <br>• <b>SL</b> = ujung terjauh FVG lama s/d IFVG {('+' + format(NS_SL_BUF*100, '.2f') + '%')} ; <b>TP</b> = titik BOS terkunci. Setelah SL tunggu acuan lain; setup selesai kalau TP,
     BOS usai kalau harga kembali ke titik BOS setelah acuan tersentuh, mati kalau close H1 menembus level asli lagi. <b>Tanpa expired.</b>
