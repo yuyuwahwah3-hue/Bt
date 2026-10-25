@@ -564,7 +564,8 @@ def detect_all_events(df, m5):
 #    antara level yang dibreak dan titik terjauh (NS_RANGE_MODE=melebar: batas ikut melebar mengikuti titik terjauh berjalan
 #    sampai level baru itu selesai; =tetap: batas = titik terjauh saat BOS). Acuan aktif setelah candle ke-4 level barunya closed.
 #    HANYA acuan yang terbentuk PERTAMA setelah break-in yang dipakai ENTRY; acuan lain cuma mengunci titik BOS (kalau kena lalu harga
-#    kembali ke titik BOS -> BOS gugur tanpa entry).
+#    kembali ke titik BOS -> BOS gugur tanpa entry). Sentuhan acuan entry = ujung wick level; acuan LAIN = tepi gap FVG-nya
+#    (low candle ke-3 FVG utk Long / high utk Short; kalau ada 2 FVG, yang paling dekat harga).
 # 7) MONITORING M5 (tanpa expired): acuan TERSENTUH di M5 (wick boleh; semua acuan, entry maupun lainnya) -> titik BOS (high tertinggi / low terendah sejak BOS)
 #    DIKUNCI. Cari IFVG: FVG M5 searah trade yang menimpa gap FVG M5 lawan (boleh dari NS_LOOKBACK=20 candle sebelum sentuhan;
 #    gap lama boleh menyusut oleh candle di antaranya asal tidak hilang seluruhnya). IFVG harus terbentuk SETELAH sentuhan.
@@ -582,11 +583,13 @@ def ns_levels(H1):
         if c[i] < o[i] and c[i + 1] > o[i + 1]:
             lvl = min(l[i], l[i + 1])
             if l[i + 2] > lvl and l[i + 3] > lvl and (l[i + 2] > h[i] or l[i + 3] > h[i + 1]):
-                out.append({'ty': 'support', 'd': 'Long', 'L': float(lvl), 'c1': i, 'c4': i + 3})
+                fzs = ([l[i + 2]] if l[i + 2] > h[i] else []) + ([l[i + 3]] if l[i + 3] > h[i + 1] else [])
+                out.append({'ty': 'support', 'd': 'Long', 'L': float(lvl), 'c1': i, 'c4': i + 3, 'fz': float(max(fzs))})
         if c[i] > o[i] and c[i + 1] < o[i + 1]:
             lvl = max(h[i], h[i + 1])
             if h[i + 2] < lvl and h[i + 3] < lvl and (h[i + 2] < l[i] or h[i + 3] < l[i + 1]):
-                out.append({'ty': 'resistance', 'd': 'Short', 'L': float(lvl), 'c1': i, 'c4': i + 3})
+                fzs = ([h[i + 2]] if h[i + 2] < l[i] else []) + ([h[i + 3]] if h[i + 3] < l[i + 1] else [])
+                out.append({'ty': 'resistance', 'd': 'Short', 'L': float(lvl), 'c1': i, 'c4': i + 3, 'fz': float(min(fzs))})
     return out
 
 
@@ -733,9 +736,11 @@ def ns_chain(S, LV, X):
             rext = ext
         if ((lvl <= x['L'] <= rext) if sup else (rext <= x['L'] <= lvl)):
             av = max(int(hts[c4]) + H1_MS, seen0)
-            acs.append((int(np.searchsorted(ts5, av)), x['L']))
+            acs.append((int(np.searchsorted(ts5, av)), x['L'], x['fz']))
             if entry_c1 is None or x['c1'] < entry_c1:      # acuan ENTRY = yang terbentuk PERTAMA setelah break-in
                 entry_c1 = x['c1']; entry_A = x['L']
+    # batas sentuh: acuan entry = ujung wick level; acuan lain = tepi gap FVG-nya (low candle ke-3 FVG utk Long / high utk Short)
+    acs = [(av, A, (A if A == entry_A else fz)) for av, A, fz in acs]
     acs.sort()
     if not acs:
         return [], 'tanpa_acuan'
@@ -760,14 +765,14 @@ def ns_chain(S, LV, X):
                 if seg.any():
                     tl = j + int(seg.argmax())
         best_t = None
-        for av, A in acs:
+        for av, A, T in acs:
             if A in used or av >= end:
                 continue
             s = max(j, av)
             lim = end if best_t is None else min(end, best_t + 1)
             if s >= lim:
                 continue
-            seg = (L5[s:lim] <= A) if sup else (H5[s:lim] >= A)
+            seg = (L5[s:lim] <= T) if sup else (H5[s:lim] >= T)
             if seg.any():
                 t = s + int(seg.argmax())
                 if best_t is None or t < best_t:
@@ -776,7 +781,7 @@ def ns_chain(S, LV, X):
             status = 'bos_selesai'; break
         if best_t is None:
             status = 'level_ditembus_lagi' if dead_idx < n5 else 'pending'; break
-        touched = [A for av, A in acs if A not in used and av <= best_t and ((L5[best_t] <= A) if sup else (H5[best_t] >= A))]
+        touched = [A for av, A, T in acs if A not in used and av <= best_t and ((L5[best_t] <= T) if sup else (H5[best_t] >= T))]
         for A in touched:
             used.add(A)
         tj0 = best_t
@@ -838,7 +843,7 @@ def ns_chain(S, LV, X):
         si = q + 1 + int(sg_.argmax()) if sg_.any() else n5
         ti = q + 1 + int(tg_.argmax()) if tg_.any() else n5
         tr = {'touch': tj0, 'q': q, 'entry': entry, 'sl': slv, 'tp': tp,
-              'acuan': (max(touched) if sup else min(touched))}
+              'acuan': entry_A}
         if si >= n5 and ti >= n5:
             tr.update(why='Open', z=n5 - 1); trades.append(tr); status = 'terbuka'; break
         if si <= ti:
