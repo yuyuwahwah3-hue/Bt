@@ -64,7 +64,7 @@ IFVG_LOOKBACK    = int(os.environ.get('IFVG_LOOKBACK', 48))          # FVG tidak
 STRATEGY         = os.environ.get('STRATEGY', 'multi_acuan').strip().lower()
 NS_SWING_EXT     = int(os.environ.get('NS_SWING_EXT', 5))            # titik terjauh harus swing: N candle H1 kiri & kanan tidak melebihi
 NS_LOOKBACK      = int(os.environ.get('NS_LOOKBACK', 20))            # FVG lama boleh dari N candle M5 sebelum acuan tersentuh
-NS_SL_BUF        = float(os.environ.get('NS_SL_BUF', '0.002'))       # buffer SL di luar ujung FVG (0.002 = 0.2%)
+NS_SL_BUF        = float(os.environ.get('NS_SL_BUF', '0.00'))       # buffer SL di luar ujung FVG (0.002 = 0.2%)
 NS_RANGE_MELEBAR = os.environ.get('NS_RANGE_MODE', 'melebar').strip().lower() != 'tetap'   # range acuan melebar mengikuti titik terjauh berjalan
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
@@ -86,7 +86,7 @@ def _default_end_date():
 def _default_start_date():
     d = datetime.now(timezone.utc)
     # mundur 1 tahun kalender dari hari ini
-    return (d - timedelta(days=665)).strftime('%Y-%m-%d')
+    return (d - timedelta(days=659)).strftime('%Y-%m-%d')
 
 BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', _default_start_date())
 BACKTEST_END_DATE   = os.environ.get('BACKTEST_END_DATE', _default_end_date())
