@@ -49,7 +49,7 @@ from pybit.unified_trading import HTTP
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))   # modal awal, 1 akun bersama
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.02'))          # risk per trade dari balance (compound)
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0006'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
 
@@ -67,10 +67,10 @@ NS_LOOKBACK      = int(os.environ.get('NS_LOOKBACK', 20))            # FVG lama 
 NS_SL_BUF        = float(os.environ.get('NS_SL_BUF', '0.002'))       # buffer SL di luar ujung FVG (0.002 = 0.2%)
 NS_RANGE_MELEBAR = os.environ.get('NS_RANGE_MODE', 'melebar').strip().lower() != 'tetap'   # range acuan melebar mengikuti titik terjauh berjalan
 
-LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
+LEVERAGE           = float(os.environ.get('LEVERAGE', '25'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
 
-MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '10').strip().lower()
+MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '12').strip().lower()
 MAX_CONCURRENT = float('inf') if MAX_CONCURRENT_RAW in ('', '0', 'unlimited', 'inf') else int(MAX_CONCURRENT_RAW)
 
 ALLOW_HEDGE      = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
