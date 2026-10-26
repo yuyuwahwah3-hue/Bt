@@ -48,10 +48,10 @@ from pybit.unified_trading import HTTP
 # CONFIG (override via environment variable kalau perlu)
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
-INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))   # modal awal, 1 akun bersama
+INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '1000.0'))   # modal awal, 1 akun bersama
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
-FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0006'))
-FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
+FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
+FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 EMA_BIAS_FILTER  = os.environ.get('EMA_BIAS_FILTER', '1').strip() not in ('0', 'false', 'False', '')
 BIAS_EMA_FAST    = int(os.environ.get('BIAS_EMA_FAST', 21))
@@ -67,10 +67,10 @@ NS_LOOKBACK      = int(os.environ.get('NS_LOOKBACK', 20))            # FVG lama 
 NS_SL_BUF        = float(os.environ.get('NS_SL_BUF', '0.002'))       # buffer SL di luar ujung FVG (0.002 = 0.2%)
 NS_RANGE_MELEBAR = os.environ.get('NS_RANGE_MODE', 'melebar').strip().lower() != 'tetap'   # range acuan melebar mengikuti titik terjauh berjalan
 
-LEVERAGE           = float(os.environ.get('LEVERAGE', '25'))
+LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
 
-MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '12').strip().lower()
+MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '0').strip().lower()
 MAX_CONCURRENT = float('inf') if MAX_CONCURRENT_RAW in ('', '0', 'unlimited', 'inf') else int(MAX_CONCURRENT_RAW)
 
 ALLOW_HEDGE      = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
@@ -86,7 +86,7 @@ def _default_end_date():
 def _default_start_date():
     d = datetime.now(timezone.utc)
     # mundur 1 tahun kalender dari hari ini
-    return (d - timedelta(days=659)).strftime('%Y-%m-%d')
+    return (d - timedelta(days=365)).strftime('%Y-%m-%d')
 
 BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', _default_start_date())
 BACKTEST_END_DATE   = os.environ.get('BACKTEST_END_DATE', _default_end_date())
@@ -98,11 +98,15 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 # CATATAN: daftar ini dipilih dari strategi lama -- jalankan ulang backtest dgn
 # strategi sekarang lalu filter ulang kalau perlu.
 SYMBOLS = [
-    'HUSDT', 'POLUSDT', 'MASKUSDT', 'PENDLEUSDT', 'ADAUSDT',
-'STRKUSDT', '1000BONKUSDT', 'IOTAUSDT', 'AEVOUSDT', 'ACHUSDT',
-'IOTXUSDT', 'WOOUSDT', 'ESPORTSUSDT', 'USUALUSDT', 'BLURUSDT',
-'PLUMEUSDT', 'JUPUSDT', 'WUSDT', 'CRVUSDT', 'ENAUSDT',
-'MEWUSDT', 'IMXUSDT', 'CKBUSDT'
+    'PENDLEUSDT', 'PYTHUSDT', 'BLURUSDT', '1000BONKUSDT', 'WUSDT',
+    'USUALUSDT', 'ETHFIUSDT', 'LABUSDT', 'IOTAUSDT', '1000FLOKIUSDT',
+    'HBARUSDT', 'PLUMEUSDT', 'BERAUSDT', 'MASKUSDT', 'ESPORTSUSDT',
+    'IMXUSDT', 'CRVUSDT', 'ACHUSDT', 'FARTCOINUSDT', 'AEVOUSDT',
+    'ICPUSDT', 'ENAUSDT', 'ADAUSDT', 'WIFUSDT', 'DYDXUSDT',
+    'BATUSDT', 'LRCUSDT', 'IOUSDT', 'BOMEUSDT', 'OPUSDT',
+    'POPCATUSDT', 'WOOUSDT', 'STORJUSDT', 'ROSEUSDT', 'POWRUSDT',
+    'JUPUSDT', 'HUSDT', 'STRKUSDT', 'IOTXUSDT', 'MEWUSDT',
+    'VIRTUALUSDT', 'POLUSDT', 'CKBUSDT', 'ASTRUSDT'
 ]
 
 
@@ -562,7 +566,8 @@ def detect_all_events(df, m5):
 #    SEMUA acuan dipakai. Acuan sentuh pertama di M5 (wick boleh) -> titik BOS (high tertinggi / low terendah sejak BOS) DIKUNCI.
 # 7) ENTRY per acuan, tanpa monitoring M5/IFVG: acuan harus di-BREAK-OUT lalu di-BREAK-IN oleh candle H1 (close menembus keluar lalu
 #    close kembali; aturan wick sama dgn level utama: candle yg cuma wick wajib diikuti candle break, kalau tidak acuan itu batal;
-#    candle break-out harus mulai setelah acuan aktif). ENTRY MARKET di close candle H1 break-in.
+#    candle break-out harus mulai setelah acuan aktif). Break-out acuan WAJIB ada FVG H1 searah break-out (2 candle sebelum s/d 1 candle
+#    sesudah break-out, seperti level utama); break-in tidak butuh FVG. ENTRY MARKET di close candle H1 break-in.
 #    SL = ujung terjauh antara break-out s/d break-in acuan (low terendah / high tertinggi, inklusif) +NS_SL_BUF. TP = titik BOS terkunci.
 # 8) Setelah SL tunggu acuan lain yang break-in-nya terjadi sesudahnya. Setup SELESAI kalau TP; BOS USAI kalau harga kembali ke titik BOS
 #    terkunci sebelum entry berikutnya; setup MATI kalau (setelah BOS) close H1 menembus titik terjauh antara break-out dan break-in LEVEL UTAMA
@@ -764,6 +769,15 @@ def ns_chain(S, LV, X):
             tf_o, bf_o, tf_i, bf_i = (hh >= A), (hc > A), (hl <= A), (hc < A)
         bo_a = _ns_first_break(hk0, nh, tf_o, bf_o)
         if bo_a is None or bo_a == -1:
+            continue
+        # FVG H1 searah break-out (aturan sama dgn level utama): 2 candle sebelum s/d 1 candle sesudah break-out. Hanya utk break-out.
+        okf = False
+        for k_ in (bo_a - 2, bo_a - 1):
+            if k_ < 0 or k_ + 2 >= nh:
+                continue
+            if (hh[k_ + 2] < hl[k_]) if sup else (hl[k_ + 2] > hh[k_]):
+                okf = True; break
+        if not okf:
             continue
         bi_a = _ns_first_break(bo_a + 1, nh, tf_i, bf_i)
         if bi_a is None or bi_a == -1:
@@ -1398,7 +1412,7 @@ def _render_html() -> bytes:
     <b>BOS</b> = close H1 melewati titik terjauh. Batal kalau sebelum BOS terjadi breakout ulang atau sweep titik terjauh lalu menyentuh level lagi.
     <br>• <b>Acuan</b> = semua level baru berFVG sejenis yang terbentuk setelah break-in dan berada di range harga level dibreak s/d titik terjauh
     (range {'melebar mengikuti titik terjauh berjalan' if NS_RANGE_MELEBAR else 'tetap sampai titik terjauh saat BOS'}). Sentuhan M5 pertama ke salah satu acuan &rarr; titik BOS dikunci.
-    Tiap acuan harus di-<b>break-out</b> lalu <b>break-in</b> oleh candle H1 (close) &rarr; <b>entry market</b> di close candle break-in, tanpa monitoring M5.
+    Tiap acuan harus di-<b>break-out</b> (wajib ada FVG H1 searah break-out di sekitarnya) lalu <b>break-in</b> oleh candle H1 (close) &rarr; <b>entry market</b> di close candle break-in, tanpa monitoring M5.
     <br>• <b>SL</b> = ujung terjauh antara break-out s/d break-in acuan {('+' + format(NS_SL_BUF*100, '.2f') + '%')} ; <b>TP</b> = titik BOS terkunci. Setelah SL tunggu acuan lain; setup selesai kalau TP,
     BOS usai kalau harga kembali ke titik BOS sebelum entry, mati kalau close H1 menembus titik terjauh antara break-out &amp; break-in level utama. <b>Tanpa expired.</b>
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}. Fee masuk {FEE_ENTRY_PCT*100:.3f}% / keluar {FEE_EXIT_PCT*100:.3f}%.
