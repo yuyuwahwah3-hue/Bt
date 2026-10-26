@@ -48,8 +48,8 @@ from pybit.unified_trading import HTTP
 # CONFIG (override via environment variable kalau perlu)
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
-INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '100.0'))   # modal awal, 1 akun bersama
-RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
+INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '10.0'))   # modal awal, 1 akun bersama
+RISK_PCT         = float(os.environ.get('RISK_PCT', '0.05'))          # risk per trade dari balance (compound)
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0006'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
 
