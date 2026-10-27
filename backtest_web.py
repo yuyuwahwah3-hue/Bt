@@ -2,9 +2,9 @@
 backtest_web.py — DEFAULT: STRATEGY=multi_acuan  (S&R H1 berFVG -> break-out/break-in -> BOS -> multi-acuan -> MSS M5)
 Strategi lama (EMA21/30 + IFVG limit + target level lawan) tetap ada: set env STRATEGY=ifvg_ema.
 Aturan lengkap strategi baru ada di komentar blok "STRATEGI BARU" (cari 'STRATEGI BARU' di file ini).
-Env strategi baru: NS_SWING_EXT=5, NS_LOOKBACK=20, NS_MSS_SWING=2, NS_SL_BUF=0.002, NS_RANGE_MODE=melebar|tetap.
+Env strategi baru: NS_SWING_EXT=5, NS_LOOKBACK=20, NS_MSS_SWING=1, NS_SL_BUF=0.002, NS_RANGE_MODE=melebar|tetap, NS_ENTRY_MODE=limit_fvg|market, NS_FVG_EDGE=near|mid|far, NS_MAX_ENTRY=5 (0 = tak terbatas).
 Env umum: RISK_PCT, INITIAL_BALANCE, FEE_ENTRY_PCT, FEE_EXIT_PCT, LEVERAGE, MAX_CONCURRENT, BACKTEST_START_DATE/END_DATE.
-Endpoint: /  (dashboard) | /trades.csv | /setups.txt (format txt per setup: Coin, Dir, Hasil, Level, Tanggal level, ...) | /logs
+Endpoint: /  (dashboard) | /trades.csv | /setups.txt (format txt per entry: Coin, Dir, Hasil, Level, Tanggal level, Acuan, P, P tanggal, Swing, Swing tanggal, Mss tanggal) | /logs
 =======================================================================================================================
 (Dokumentasi STRATEGI LAMA, hanya berlaku kalau STRATEGY=ifvg_ema)
 backtest_web.py — Backtest S&R H1 + FVG H1 + bias EMA21/30 + konfirmasi Inverted FVG (M5), exit TARGET level lawan
@@ -51,8 +51,8 @@ from pybit.unified_trading import HTTP
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '1000.0'))   # modal awal, 1 akun bersama
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
-FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
-FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
+FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0006'))
+FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
 
 EMA_BIAS_FILTER  = os.environ.get('EMA_BIAS_FILTER', '1').strip() not in ('0', 'false', 'False', '')
 BIAS_EMA_FAST    = int(os.environ.get('BIAS_EMA_FAST', 21))
@@ -65,14 +65,20 @@ IFVG_LOOKBACK    = int(os.environ.get('IFVG_LOOKBACK', 48))          # FVG tidak
 STRATEGY         = os.environ.get('STRATEGY', 'multi_acuan').strip().lower()
 NS_SWING_EXT     = int(os.environ.get('NS_SWING_EXT', 5))            # titik terjauh harus swing: N candle H1 kiri & kanan tidak melebihi
 NS_LOOKBACK      = int(os.environ.get('NS_LOOKBACK', 20))            # FVG lama boleh dari N candle M5 sebelum acuan tersentuh
-NS_MSS_SWING     = int(os.environ.get('NS_MSS_SWING', 2))            # swing M5 utk MSS: N candle kiri & kanan
+NS_MSS_SWING     = int(os.environ.get('NS_MSS_SWING', 1))            # swing fractal M5 utk MSS: N candle kiri & kanan (default 1)
+NS_SW_EQUAL      = os.environ.get('NS_SW_EQUAL', 'invalid').strip().lower()   # swing fractal: angka sama dgn tetangga kiri/kanan: 'invalid' (default, sama = BUKAN swing) | 'valid' (sama boleh, cara lama)
+NS_MSS_REF       = os.environ.get('NS_MSS_REF', 'range').strip().lower()   # 'range' (default): swing = tertinggi/terendah antara P lama & P baru, dihitung ulang tiap P bergeser | 'range_max' (swing tak pernah turun) | 'fractal' (lama)
+NS_P_EQUAL       = os.environ.get('NS_P_EQUAL', 'invalid').strip().lower()   # low/high P sama persis dgn tetangga kiri/kanan: 'invalid' (default, sama = P TIDAK valid) | 'valid' (sama dianggap boleh, cara sebelumnya) | 'merge' (candle sama persis menggeser kandidat P ke candle terakhir, double-bottom dihitung 1 P)
+NS_ENTRY_MODE    = os.environ.get('NS_ENTRY_MODE', 'limit_fvg').strip().lower()   # 'limit_fvg' (default): limit di FVG terdekat dgn MSS | 'market': entry market di close candle MSS (cara lama)
+NS_FVG_EDGE      = os.environ.get('NS_FVG_EDGE', 'near').strip().lower()     # titik limit di FVG: 'near' (tepi terdekat ke harga sekarang, default) | 'mid' | 'far'
+NS_MAX_ENTRY     = int(os.environ.get('NS_MAX_ENTRY', 5))           # maksimal entry per BOS (setelah SL boleh entry lagi di acuan lain, sampai batas ini); 0 = tak terbatas
 NS_SL_BUF        = float(os.environ.get('NS_SL_BUF', '0.002'))       # buffer SL di luar ujung FVG (0.002 = 0.2%)
 NS_RANGE_MELEBAR = os.environ.get('NS_RANGE_MODE', 'melebar').strip().lower() != 'tetap'   # range acuan melebar mengikuti titik terjauh berjalan
 
-LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
+LEVERAGE           = float(os.environ.get('LEVERAGE', '25'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
 
-MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '0').strip().lower()
+MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '10').strip().lower()
 MAX_CONCURRENT = float('inf') if MAX_CONCURRENT_RAW in ('', '0', 'unlimited', 'inf') else int(MAX_CONCURRENT_RAW)
 
 ALLOW_HEDGE      = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
@@ -88,7 +94,7 @@ def _default_end_date():
 def _default_start_date():
     d = datetime.now(timezone.utc)
     # mundur 1 tahun kalender dari hari ini
-    return (d - timedelta(days=365)).strftime('%Y-%m-%d')
+    return (d - timedelta(days=655)).strftime('%Y-%m-%d')
 
 BACKTEST_START_DATE = os.environ.get('BACKTEST_START_DATE', _default_start_date())
 BACKTEST_END_DATE   = os.environ.get('BACKTEST_END_DATE', _default_end_date())
@@ -569,7 +575,7 @@ def detect_all_events(df, m5):
 # 7) MONITORING M5 (tanpa expired): acuan TERSENTUH (wick boleh) -> titik BOS (high tertinggi / low terendah sejak BOS) DIKUNCI.
 #    Lalu tunggu MSS (Market Structure Shift, SMC) di M5: Long = setelah low terendah sejak sentuh (P), candle M5 pertama yang CLOSE di atas
 #    swing high terakhir sebelum P (fractal NS_MSS_SWING=2 kiri-kanan, boleh dari NS_LOOKBACK=20 candle sebelum sentuh). Short = kebalikannya.
-#    Low/high baru memindahkan P. ENTRY MARKET di close candle MSS. SL = ujung MSS (low terendah P / high tertinggi P) +NS_SL_BUF. TP = titik BOS terkunci.
+#    Low/high baru memindahkan P. ENTRY: NS_ENTRY_MODE=limit_fvg (default) limit di FVG terdekat MSS | market = close candle MSS. SL = ujung MSS (low terendah P / high tertinggi P) +NS_SL_BUF. TP = titik BOS terkunci.
 # 8) Setelah SL tunggu acuan lain yang belum tersentuh. Setup SELESAI kalau TP; BOS USAI kalau setelah acuan tersentuh harga kembali ke titik
 #    BOS terkunci sebelum MSS/entry; setup MATI kalau (setelah BOS) close H1 menembus titik terjauh antara break-out dan break-in LEVEL UTAMA
 #    (Long: low terendah bo..bi; Short: high tertinggi bo..bi).
@@ -716,33 +722,99 @@ def _ns_overlap(pl, ph, pj, k, zl, zh, L5, H5):
 
 def _ns_find_mss(sup, tj0, stop, H5, L5, C5):
     """Market Structure Shift M5 setelah acuan tersentuh di candle tj0 (SMC).
-    Long : harga turun ke acuan, low terendah sejak sentuh = P. MSS = candle M5 pertama (setelah P) yang CLOSE di atas swing high
-           terakhir (fractal NS_MSS_SWING kiri-kanan) sebelum P, yang sudah terkonfirmasi (swing boleh dari NS_LOOKBACK candle sebelum sentuh).
-    Short: kebalikannya. Low baru (Long) / high baru (Short) memindahkan P dan swing referensinya. Return (idx candle MSS, idx P) / None."""
+    Long : harga turun ke acuan, low terendah = P. MSS = candle M5 pertama yang CLOSE di atas swing high referensi.
+    Short: kebalikannya (P = high tertinggi, referensi = swing low).
+    P VALID: candle ekstrem (Long: low terendah sejak sentuh; Short: high tertinggi) yang tidak dilampaui oleh 1 candle di kirinya
+      dan 1 candle di kanannya. Angka SAMA PERSIS dgn tetangga kiri/kanan juga TIDAK valid (NS_P_EQUAL='invalid', default): P harus
+      benar-benar lebih dalam dari kedua tetangganya (Long: low-nya < low kiri DAN < low kanan). P baru dianggap valid setelah candle
+      kanannya closed; kalau candle kanan membuat ekstrem yang lebih jauh, kandidat lama gugur (bukan P) dan kandidat baru yang dipakai;
+      kalau candle kanan sama persis, kandidat itu tidak valid sampai ada ekstrem baru yang lebih dalam.
+      MSS hanya dicek terhadap P yang valid.
+    Swing referensi:
+     - Selama baru ada 1 P valid: swing fractal (NS_MSS_SWING kiri-kanan, default 1; angka sama dgn tetangga = BUKAN swing, NS_SW_EQUAL='invalid';
+       boleh dari NS_LOOKBACK candle sebelum sentuh) terakhir sebelum P.
+     - NS_MSS_REF='range' (default): tiap P valid baru muncul, swing = HIGH TERTINGGI (Short: LOW TERENDAH) antara P valid lama s/d
+       P valid baru (inklusif). Dihitung ulang di SETIAP pergeseran P (tidak kumulatif).
+     - NS_MSS_REF='range_max': sama, tapi swing hanya naik (Long) / turun (Short), tidak pernah diturunkan (tertinggi sejak P pertama).
+     - NS_MSS_REF='fractal' (cara lama): referensi selalu swing fractal terakhir sebelum P.
+    Return (idx candle MSS, idx P valid, idx candle swing yang ditembus) / None."""
     N = NS_MSS_SWING
     hi = min(stop, len(H5))
     lo = max(tj0 - NS_LOOKBACK, 0)
     arr = H5 if sup else L5
-    if hi - lo < 2 * N + 1:
+    use_range = (NS_MSS_REF != 'fractal')
+    sw = []
+    if hi - lo >= 2 * N + 1:
+        w = np.lib.stride_tricks.sliding_window_view(arr[lo:hi], 2 * N + 1)
+        c_ = w[:, N]
+        if NS_SW_EQUAL == 'valid':      # cara lama: sama boleh
+            m_ = (c_ >= w.max(axis=1)) if sup else (c_ <= w.min(axis=1))
+        else:                           # sama persis dgn salah satu tetangga = bukan swing
+            lf, rt = w[:, :N], w[:, N + 1:]
+            m_ = ((c_ > lf.max(axis=1)) & (c_ > rt.max(axis=1))) if sup else ((c_ < lf.min(axis=1)) & (c_ < rt.min(axis=1)))
+        sw = (np.flatnonzero(m_) + lo + N).tolist()
+    if not sw and not use_range:
         return None
-    w = np.lib.stride_tricks.sliding_window_view(arr[lo:hi], 2 * N + 1)
-    c_ = w[:, N]
-    m_ = (c_ >= w.max(axis=1)) if sup else (c_ <= w.min(axis=1))
-    sw = (np.flatnonzero(m_) + lo + N).tolist()
-    if not sw:
-        return None
-    P = tj0
+    more = (lambda a, b: L5[a] < L5[b]) if sup else (lambda a, b: H5[a] > H5[b])        # a lebih ekstrem dari b
+    strict = (NS_P_EQUAL == 'invalid')
+    if strict:      # tetangga b harus benar-benar tidak melampaui a: sama persis = tidak valid
+        ok_nb = (lambda a, b: L5[b] > L5[a]) if sup else (lambda a, b: H5[b] < H5[a])
+    else:           # sama dianggap boleh
+        ok_nb = (lambda a, b: L5[b] >= L5[a]) if sup else (lambda a, b: H5[b] <= H5[a])
+    cand = tj0
+    left_ok = (tj0 - 1 < 0) or ok_nb(tj0, tj0 - 1)
+    Pv = None; rref = None
     for t in range(tj0 + 1, hi):
-        if (L5[t] < L5[P]) if sup else (H5[t] > H5[P]):
-            P = t
+        if more(t, cand) or (NS_P_EQUAL == 'merge' and ((L5[t] == L5[cand]) if sup else (H5[t] == H5[cand]))):   # ekstrem baru -> kandidat lama gugur
+            cand = t; left_ok = True
             continue
-        k = bisect.bisect_right(sw, min(P - 1, t - N)) - 1
-        if k < 0:
+        # candle t tidak melampaui cand: cek sisi kanan (candle tepat setelah cand), lalu cand = P valid kalau sisi kirinya juga aman
+        if t == cand + 1 and not ok_nb(cand, t):        # sama persis dgn candle kanan -> cand tidak valid
+            left_ok = False
+        if Pv != cand and left_ok:
+            if use_range and Pv is not None:
+                seg = H5[Pv:cand + 1] if sup else L5[Pv:cand + 1]
+                cx = Pv + int(seg.argmax() if sup else seg.argmin())
+                if NS_MSS_REF == 'range_max' and rref is not None and ((H5[cx] <= H5[rref]) if sup else (L5[cx] >= L5[rref])):
+                    pass            # 'range_max': swing hanya naik/turun, tidak pernah diturunkan
+                else:
+                    rref = cx       # 'range': swing dihitung ulang di SETIAP pergeseran P valid
+            Pv = cand
+        if Pv != cand:
             continue
-        ref = sw[k]
+        if use_range and rref is not None:
+            ref = rref
+        else:
+            k = bisect.bisect_right(sw, min(cand - 1, t - N)) - 1
+            if k < 0:
+                continue
+            ref = sw[k]
         if (C5[t] > H5[ref]) if sup else (C5[t] < L5[ref]):
-            return t, P
+            return t, cand, ref
     return None
+
+
+def _ns_find_fvg(sup, P, q, stop, X):
+    """FVG (3 candle M5: c1,c2,c3) di dalam pergerakan MSS, untuk entry limit.
+    Long : FVG bullish (low c3 > high c1), zona [high c1, low c3]. Short: FVG bearish (high c3 < low c1), zona [high c3, low c1].
+    Kandidat: c1 >= P (mulai dari P) dan c3 <= q (candle MSS). Diambil yang PALING DEKAT dgn break MSS (c3 terbesar).
+    Kalau belum ada FVG sampai candle MSS, tunggu 1 candle lagi: candle setelah MSS (q+1) boleh jadi c3 (c1=q-1, c2=q).
+    Return (idx c3, batas bawah zona, batas atas zona) / None."""
+    flag = X['bull'] if sup else X['bear']
+    H5, L5 = X['H5'], X['L5']
+    k = None
+    for kk in range(q, P + 1, -1):                 # c3 = kk, c1 = kk-2 >= P
+        if flag[kk]:
+            k = kk; break
+    if k is None:
+        kk = q + 1
+        if kk < min(stop, len(H5)) and flag[kk]:   # tunggu 1 candle lagi setelah MSS
+            k = kk
+    if k is None:
+        return None
+    if sup:
+        return k, float(H5[k - 2]), float(L5[k])
+    return k, float(H5[k]), float(L5[k - 2])
 
 
 def ns_chain(S, LV, X):
@@ -824,40 +896,74 @@ def ns_chain(S, LV, X):
                 cancel_idx = q0 + int(seg.argmax())
         dead2 = next_death(q0)
         stop = min(cancel_idx, dead2)
-        trig = None
+        trig = None; no_fvg = False
         mss = _ns_find_mss(sup, tj0, stop, H5, L5, C5)
         if mss is not None:
-            q, P = mss
-            entry = float(C5[q])
+            q, P, ref = mss
             if sup:
-                slv = float(L5[P]) * (1 - NS_SL_BUF); ok = slv < entry < BE
+                slv = float(L5[P]) * (1 - NS_SL_BUF)
             else:
-                slv = float(H5[P]) * (1 + NS_SL_BUF); ok = BE < entry < slv
-            if ok:
-                trig = (q, entry, slv)
+                slv = float(H5[P]) * (1 + NS_SL_BUF)
+            if NS_ENTRY_MODE == 'market':
+                entry = float(C5[q])
+                ok = (slv < entry < BE) if sup else (BE < entry < slv)
+                if ok:
+                    trig = (q, entry, slv, P, ref, None, None)
+            else:
+                # LIMIT di FVG terdekat dgn MSS (c3 terbesar <= q; kalau belum ada, tunggu candle q+1).
+                # Limit dipasang setelah candle c3 closed (po), terfill di candle pertama setelahnya yang wick-nya menyentuh harga limit;
+                # batal kalau harga lebih dulu sampai titik BOS / level mati (stop).
+                fvg = _ns_find_fvg(sup, P, q, stop, X)
+                if fvg is None:
+                    no_fvg = (q + 1 < min(stop, n5))
+                else:
+                    k, zl, zh = fvg
+                    po = max(q, k)
+                    if sup:
+                        entry = {'near': zh, 'mid': (zl + zh) / 2, 'far': zl}.get(NS_FVG_EDGE, zh)
+                    else:
+                        entry = {'near': zl, 'mid': (zl + zh) / 2, 'far': zh}.get(NS_FVG_EDGE, zl)
+                    entry = float(entry)
+                    ok = (slv < entry < BE) if sup else (BE < entry < slv)
+                    e2 = min(stop, n5)
+                    if ok and po + 1 < e2:
+                        seg = (L5[po + 1:e2] <= entry) if sup else (H5[po + 1:e2] >= entry)
+                        if seg.any():
+                            trig = (q, entry, slv, P, ref, po + 1 + int(seg.argmax()), fvg)
         if trig is None:
-            if cancel_idx <= dead2 and cancel_idx < n5:
+            if no_fvg:
+                status = 'tanpa_fvg'
+            elif cancel_idx <= dead2 and cancel_idx < n5:
                 status = 'gugur_ke_titik_BOS'
             elif dead2 < n5:
                 status = 'level_ditembus_lagi'
             else:
                 status = 'pending'
             break
-        q, entry, slv = trig; tp = BE
-        if q + 1 >= n5:
-            status = 'pending'; break
+        q, entry, slv, P, ref, f_fill, fvg = trig; tp = BE
+        if f_fill is None:                      # market: posisi dibuka di open candle q+1, SL & TP dicek mulai q+1
+            if q + 1 >= n5:
+                status = 'pending'; break
+            a_sl = a_tp = q + 1
+        else:                                   # limit: SL dicek mulai candle fill, TP baru candle berikutnya (urutan dlm candle fill tak diketahui)
+            a_sl, a_tp = f_fill, f_fill + 1
         if sup:
-            sg_ = L5[q + 1:] <= slv; tg_ = H5[q + 1:] >= tp
+            sg_ = L5[a_sl:] <= slv; tg_ = H5[a_tp:] >= tp
         else:
-            sg_ = H5[q + 1:] >= slv; tg_ = L5[q + 1:] <= tp
-        si = q + 1 + int(sg_.argmax()) if sg_.any() else n5
-        ti = q + 1 + int(tg_.argmax()) if tg_.any() else n5
+            sg_ = H5[a_sl:] >= slv; tg_ = L5[a_tp:] <= tp
+        si = a_sl + int(sg_.argmax()) if sg_.any() else n5
+        ti = a_tp + int(tg_.argmax()) if tg_.any() else n5
         tr = {'touch': tj0, 'q': q, 'entry': entry, 'sl': slv, 'tp': tp,
-              'acuan': (max(touched) if sup else min(touched))}
+              'acuan': (max(touched) if sup else min(touched)), 'P': P, 'ref': ref, 'f': f_fill, 'fvg': fvg}
+        _a_px = tr['acuan']
+        tr['ac_ts'] = next((int(hts[x['c1']]) for x in LV if x['ty'] == S['ty'] and x['c1'] > bi and x['L'] == _a_px), None)
         if si >= n5 and ti >= n5:
             tr.update(why='Open', z=n5 - 1); trades.append(tr); status = 'terbuka'; break
         if si <= ti:
-            tr.update(why='SL', z=si); trades.append(tr); j = si + 1
+            tr.update(why='SL', z=si); trades.append(tr)
+            if NS_MAX_ENTRY and len(trades) >= NS_MAX_ENTRY:
+                status = 'maks_entry'; break
+            j = si + 1
             if j >= n5:
                 status = 'pending'; break
             continue
@@ -869,7 +975,7 @@ def ns_detect_events(df, m5):
     """Return (events, stats, setups). events = 1 entry market per trade (urut fill_ts); setups = info per setup (untuk /setups.txt)."""
     stats = {'levels': 0, 'break_out_in': 0, 'wick_batal_keluar': 0, 'wick_batal_masuk': 0, 'terjauh_bukan_swing': 0,
              'no_fvg': 0, 'batal_sebelum_bos': 0, 'tanpa_bos': 0, 'bos': 0, 'tanpa_acuan': 0, 'level_ditembus_lagi': 0,
-             'bos_selesai': 0, 'gugur_ke_titik_BOS': 0, 'selesai_TP': 0, 'pending': 0, 'terbuka': 0, 'entry': 0,
+             'bos_selesai': 0, 'gugur_ke_titik_BOS': 0, 'tanpa_fvg': 0, 'maks_entry': 0, 'selesai_TP': 0, 'pending': 0, 'terbuka': 0, 'entry': 0,
              'acuan_total': 0}
     events, setups = [], []
     if m5 is None or df is None or len(df) < 30:
@@ -888,7 +994,7 @@ def ns_detect_events(df, m5):
     hts = H1['ts']
     X = {'ts5': ts5, 'H5': H5, 'L5': L5, 'C5': C5, 'O5': O5, 'hts': hts, 'hh': H1['h'], 'hl': H1['l'], 'hc': H1['c'],
          'lm5': np.searchsorted(ts5, hts + H1_MS - M5_MS), 'bull': bull, 'bear': bear}
-    seen = set()
+    seen = set(); bos_cnt = {}
     for S in S_list:
         trades, status = ns_chain(S, LV, X)
         stats[status] = stats.get(status, 0) + 1
@@ -896,19 +1002,30 @@ def ns_detect_events(df, m5):
         info = {'d': d, 'L': S['L'], 'c1_ts': int(hts[S['i']]), 'bo_ts': int(hts[S['bo']]), 'bi_ts': int(hts[S['bi']]),
                 'ext': S['ext'], 'bos_ts': int(hts[S['bos']]), 'status': status, 'trades': []}
         for k_, tr in enumerate(trades):
-            info['trades'].append({'why': tr['why'], 'entry': tr['entry'], 'sl': tr['sl'], 'tp': tr['tp']})
+            _P, _ref = tr['P'], tr['ref']
             key = (d, round(tr['entry'], 10), round(tr['sl'], 10), int(ts5[tr['q']]))
+            bk = (d, int(hts[S['bos']]))
+            if NS_MAX_ENTRY and key not in seen and bos_cnt.get(bk, 0) >= NS_MAX_ENTRY:
+                continue          # 1 BOS maksimal NS_MAX_ENTRY entry (lintas setup kembar yang BOS-nya sama)
+            info['trades'].append({'why': tr['why'], 'entry': tr['entry'], 'sl': tr['sl'], 'tp': tr['tp'],
+                                   'ac_ts': tr['ac_ts'],
+                                   'p': float(H5[_P] if d == 'Short' else L5[_P]), 'p_ts': int(ts5[_P]),
+                                   'sw': float(L5[_ref] if d == 'Short' else H5[_ref]), 'sw_ts': int(ts5[_ref]),
+                                   'mss_ts': int(ts5[tr['q']]),
+                                   'fvg': (None if tr['fvg'] is None else
+                                           {'lo': tr['fvg'][1], 'hi': tr['fvg'][2], 'c1_ts': int(ts5[tr['fvg'][0] - 2]), 'c3_ts': int(ts5[tr['fvg'][0]])})})
             if key in seen:           # setup kembar (BOS sama, level beda) -> 1 sinyal
                 continue
-            seen.add(key)
+            seen.add(key); bos_cnt[bk] = bos_cnt.get(bk, 0) + 1
             stats['entry'] += 1
             events.append({
                 'kind': kind, 'type': S['ty'], 'level': S['L'], 'direction': d,
-                'entry_price': tr['entry'], 'sl_price': tr['sl'], 'fill_ts': int(ts5[tr['q']]) + M5_MS,
+                'entry_price': tr['entry'], 'sl_price': tr['sl'],
+                'fill_ts': (int(ts5[tr['q']]) + M5_MS) if tr['f'] is None else int(ts5[tr['f']]),
                 'test1_ts': int(ts5[tr['touch']]), 'test2_ts': int(ts5[tr['q']]), 'c1_ts': int(hts[S['i']]),
-                'targets': [], 'tp_fixed': tr['tp'], 'tp_on_fill': True,
+                'targets': [], 'tp_fixed': tr['tp'], 'tp_on_fill': (tr['f'] is None),
                 'meta': {'bo_ts': int(hts[S['bo']]), 'bi_ts': int(hts[S['bi']]), 'ext': S['ext'], 'bos_ts': int(hts[S['bos']]),
-                         'acuan': tr['acuan'], 'seq': k_ + 1, 'tp': tr['tp']},
+                         'acuan': tr['acuan'], 'seq': k_ + 1, 'tp': tr['tp'], 'mss_ts': int(ts5[tr['q']])},
             })
         setups.append(info)
     events.sort(key=lambda e: e['fill_ts'])
@@ -1289,7 +1406,7 @@ def _run():
         else:
             _log_msg(f"🚀 Mulai backtest STRATEGI BARU (S&R H1 berFVG -> break-out/in -> BOS -> multi-acuan -> MSS M5) — {len(SYMBOLS)} koin, {BACKTEST_START_DATE} s/d {BACKTEST_END_DATE}")
             _log_msg(f"   Swing titik terjauh {NS_SWING_EXT} kiri-kanan, range acuan {'melebar' if NS_RANGE_MELEBAR else 'tetap'}, MSS M5 (swing {NS_MSS_SWING} kiri-kanan, dari {NS_LOOKBACK} candle M5 sebelum sentuh), "
-                      f"entry MARKET di close candle MSS, SL +{NS_SL_BUF*100:.2f}% di luar ujung MSS, TP = titik BOS terkunci, tanpa expired.")
+                      f"entry {'LIMIT di FVG terdekat MSS (titik ' + NS_FVG_EDGE + ')' if NS_ENTRY_MODE != 'market' else 'MARKET di close candle MSS'}, SL +{NS_SL_BUF*100:.2f}% di luar ujung MSS, TP = titik BOS terkunci, tanpa expired.")
 
         coins = {}
         m5_data = {}
@@ -1361,7 +1478,7 @@ def _run():
             _ns_stats.clear()
             _ns_stats.update({k: sum_st(k) for k in ('levels', 'break_out_in', 'wick_batal_keluar', 'wick_batal_masuk',
                                                       'terjauh_bukan_swing', 'no_fvg', 'batal_sebelum_bos', 'tanpa_bos', 'bos',
-                                                      'tanpa_acuan', 'level_ditembus_lagi', 'bos_selesai', 'selesai_TP',
+                                                      'tanpa_acuan', 'tanpa_fvg', 'maks_entry', 'level_ditembus_lagi', 'bos_selesai', 'selesai_TP',
                                                       'gugur_ke_titik_BOS', 'pending', 'terbuka', 'entry')})
             monthly_rows, avg_growth = monthly_breakdown(result['trades'], INITIAL_BALANCE)
             _monthly_results[:] = monthly_rows
@@ -1435,14 +1552,14 @@ def _render_html() -> bytes:
     <b>BOS</b> = close H1 melewati titik terjauh. Batal kalau sebelum BOS terjadi breakout ulang atau sweep titik terjauh lalu menyentuh level lagi.
     <br>• <b>Acuan</b> = semua level baru berFVG sejenis yang terbentuk setelah break-in dan berada di range harga level dibreak s/d titik terjauh
     (range {'melebar mengikuti titik terjauh berjalan' if NS_RANGE_MELEBAR else 'tetap sampai titik terjauh saat BOS'}). Acuan cukup tersentuh di M5 (wick boleh) &rarr; titik BOS dikunci &rarr; tunggu
-    <b>MSS</b> M5 (close menembus swing {NS_MSS_SWING} kiri-kanan terakhir sebelum low/high terjauh sejak sentuh) &rarr; <b>entry market</b> di close candle MSS.
+    <b>MSS</b> M5 (close menembus swing {NS_MSS_SWING} kiri-kanan terakhir sebelum low/high terjauh sejak sentuh) &rarr; <b>entry {'limit di FVG terdekat MSS (titik ' + NS_FVG_EDGE + ')' if NS_ENTRY_MODE != 'market' else 'market di close candle MSS'}</b>.
     <br>• <b>SL</b> = ujung MSS (low terendah / high tertinggi sejak sentuh) {('+' + format(NS_SL_BUF*100, '.2f') + '%')} ; <b>TP</b> = titik BOS terkunci. Setelah SL tunggu acuan lain; setup selesai kalau TP,
     BOS usai kalau harga kembali ke titik BOS sebelum entry, mati kalau close H1 menembus titik terjauh antara break-out &amp; break-in level utama. <b>Tanpa expired.</b>
     <br>⚙️ Risk {RISK_PCT*100:.0f}% dari balance (compounding). Slot maksimum: {_fmt_max_concurrent()}. Fee masuk {FEE_ENTRY_PCT*100:.3f}% / keluar {FEE_EXIT_PCT*100:.3f}%.
     <br>Level: {ns.get('levels',0)} &bull; break-out+in: {ns.get('break_out_in',0)} (batal wick keluar/masuk: {ns.get('wick_batal_keluar',0)}/{ns.get('wick_batal_masuk',0)};
     bukan swing: {ns.get('terjauh_bukan_swing',0)}; tanpa FVG: {ns.get('no_fvg',0)}) &bull; BOS: {ns.get('bos',0)} (batal sebelum BOS: {ns.get('batal_sebelum_bos',0)}) &bull;
     Setup selesai TP: {ns.get('selesai_TP',0)}, BOS usai: {ns.get('bos_selesai',0)}, level ditembus lagi: {ns.get('level_ditembus_lagi',0)},
-    tanpa acuan: {ns.get('tanpa_acuan',0)}, belum selesai: {ns.get('pending',0)+ns.get('terbuka',0)} &bull; Entry (market): {ns.get('entry',0)}.
+    tanpa acuan: {ns.get('tanpa_acuan',0)}, belum selesai: {ns.get('pending',0)+ns.get('terbuka',0)} &bull; Entry: {ns.get('entry',0)}, MSS tanpa FVG: {ns.get('tanpa_fvg',0)}.
     Sinyal terblokir saat entry — slot: {cr.get('blocked_by_slot',0)}, margin: {cr.get('blocked_by_margin',0)},
     min order: {cr.get('blocked_by_min_order',0)}, posisi searah masih aktif: {cr.get('blocked_by_dup',0)}.
     <br>Unduh: <a href="/trades.csv">/trades.csv</a> &nbsp;|&nbsp; <a href="/setups.txt">/setups.txt</a> (hasil per setup, harga saja) &nbsp;|&nbsp;
@@ -1634,40 +1751,47 @@ def _fmt_setup_t(ts_ms):
 _SETUP_NOTE = {
     'level_ditembus_lagi': 'level ditembus lagi', 'selesai_TP': '', 'pending': 'acuan belum tersentuh / belum ada entry', 'selesai_SL': '',
     'tanpa_acuan': 'tidak ada level acuan dalam range', 'terbuka': 'posisi masih terbuka',
+    'tanpa_fvg': 'MSS terjadi tapi tidak ada FVG di belakang MSS (sampai 1 candle setelahnya)',
+    'maks_entry': 'sudah mencapai batas maksimal entry per BOS',
     'gugur_ke_titik_BOS': 'gugur: harga lanjut ke titik BOS', 'bos_selesai': 'BOS usai: harga kembali ke titik BOS setelah acuan tersentuh',
 }
 
 
 def _setups_txt() -> bytes:
-    """Satu blok per setup yang sudah BOS: Coin, Dir, Hasil, Level, Tanggal level, Breakout level, Breakin level, Terjauh,
-    Break terjauh (WIB). Hasil = urutan trade berdasarkan HARGA saja (tanpa balance/slot/margin), mis. 'SL -1.00 > TP +3.20'."""
+    """Satu blok per entry (trade) hasil setup: Coin, Dir, Hasil, Level, Tanggal level, Acuan (waktu candle H1 level acuan),
+    P (ujung terjauh M5 setelah acuan tersentuh: high utk Short / low utk Long) + tanggalnya, Swing (swing M5 yang ditembus
+    saat MSS) + tanggalnya, Mss tanggal (candle M5 MSS). Hasil = R berdasarkan HARGA saja (TP +x.x / SL -1.0).
+    Setup tanpa entry tetap 1 blok: Hasil = keterangan status, field acuan/P/Swing/Mss dikosongkan. Waktu WIB.\n    Mode entry limit (NS_ENTRY_MODE=limit_fvg) menambah 3 baris: FVG (batas bawah - atas zona), FVG tanggal (candle c1), Entry (harga limit)."""
     with _lock:
         rows = list(_setups_all)
     rows.sort(key=lambda r: (r['symbol'], r['bos_ts']))
     out = []
+    lim = (NS_ENTRY_MODE != 'market')
+    def blok(r, hasil, ac='', p='', pt='', sw='', swt='', mt='', fv='', fvt='', en=''):
+        b_ = (f"Coin : {r['symbol'].lower()}\nDir : {r['d'].lower()}\nHasil : {hasil}\nLevel : {_fmt_price(r['L'])}\n"
+              f"Tanggal level : {_fmt_setup_t(r['c1_ts'])}\nAcuan : {ac}\nP : {p}\nP tanggal : {pt}\n"
+              f"Swing : {sw}\nSwing tanggal : {swt}\nMss tanggal : {mt}\n")
+        if lim:     # mode entry limit di FVG: FVG (zona + waktu c1) dan harga limit
+            b_ += f"FVG : {fv}\nFVG tanggal : {fvt}\nEntry : {en}\n"
+        return b_
     for r in rows:
         trs = r['trades']
         if not trs:
-            hasil = _SETUP_NOTE.get(r['status'], r['status'])
-        else:
-            seqs = []
-            for t in trs:
-                dist = abs(t['entry'] - t['sl'])
-                if t['why'] == 'SL':
-                    seqs.append(('SL', -1.0))
-                elif t['why'] == 'TP':
-                    seqs.append(('TP', abs(t['tp'] - t['entry']) / dist if dist > 0 else 0.0))
-                else:
-                    seqs.append(('Open', 0.0))
-            if len(seqs) <= 6:
-                seq = ' > '.join(f"{w} {v:+.2f}" for w, v in seqs)
+            out.append(blok(r, _SETUP_NOTE.get(r['status'], r['status'])))
+            continue
+        for t in trs:
+            dist = abs(t['entry'] - t['sl'])
+            if t['why'] == 'SL':
+                hasil = 'SL -1.0'
+            elif t['why'] == 'TP':
+                hasil = f"TP {abs(t['tp'] - t['entry']) / dist if dist > 0 else 0.0:+.1f}"
             else:
-                seq = f"{len(seqs)} trade ({sum(1 for w, _ in seqs if w == 'TP')} TP, {sum(1 for w, _ in seqs if w == 'SL')} SL, total {sum(v for _, v in seqs):+.2f}R)"
-            n = _SETUP_NOTE.get(r['status'], '')
-            hasil = seq + (f" ({n})" if n else '')
-        out.append(f"Coin : {r['symbol'].lower()}\nDir : {r['d'].lower()}\nHasil : {hasil}\nLevel : {_fmt_price(r['L'])}\n"
-                   f"Tanggal level : {_fmt_setup_t(r['c1_ts'])}\nBreakout level : {_fmt_setup_t(r['bo_ts'])}\n"
-                   f"Breakin level : {_fmt_setup_t(r['bi_ts'])}\nTerjauh : {_fmt_price(r['ext'])}\nBreak terjauh : {_fmt_setup_t(r['bos_ts'])}\n")
+                hasil = 'Open'
+            fv = t.get('fvg')
+            out.append(blok(r, hasil, _fmt_setup_t(t['ac_ts']) if t.get('ac_ts') else '', _fmt_price(t['p']), _fmt_setup_t(t['p_ts']),
+                            _fmt_price(t['sw']), _fmt_setup_t(t['sw_ts']), _fmt_setup_t(t['mss_ts']),
+                            (f"{_fmt_price(fv['lo'])} - {_fmt_price(fv['hi'])}" if fv else ''),
+                            (_fmt_setup_t(fv['c1_ts']) if fv else ''), _fmt_price(t['entry'])))
     return ('\n'.join(out) if out else 'Belum ada setup (backtest belum selesai atau STRATEGY=ifvg_ema).\n').encode('utf-8')
 
 
