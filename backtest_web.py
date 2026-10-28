@@ -2,7 +2,7 @@
 backtest_web.py — DEFAULT: STRATEGY=multi_acuan  (S&R H1 berFVG -> break-out/break-in -> BOS -> multi-acuan -> MSS M5)
 Strategi lama (EMA21/30 + IFVG limit + target level lawan) tetap ada: set env STRATEGY=ifvg_ema.
 Aturan lengkap strategi baru ada di komentar blok "STRATEGI BARU" (cari 'STRATEGI BARU' di file ini).
-Env strategi baru: NS_SWING_EXT=5, NS_LOOKBACK=20, NS_MSS_SWING=1, NS_SL_BUF=0.002, NS_RANGE_MODE=melebar|tetap, NS_ACUAN_MODE=swing_antara|swing_ditembus|level, NS_ENTRY_MODE=limit_fvg|market, NS_FVG_EDGE=near|mid|far, NS_MAX_ENTRY=5 (0 = tak terbatas).
+Env strategi baru: NS_SWING_EXT=5, NS_LOOKBACK=20, NS_MSS_SWING=1, NS_SL_BUF=0.002, NS_RANGE_MODE=melebar|tetap, NS_ACUAN_MODE=swing_ditembus|swing_antara|level, NS_ENTRY_MODE=limit_fvg|market, NS_FVG_EDGE=near|mid|far, NS_MAX_ENTRY=5 (0 = tak terbatas).
 Env umum: RISK_PCT, INITIAL_BALANCE, FEE_ENTRY_PCT, FEE_EXIT_PCT, LEVERAGE, MAX_CONCURRENT, BACKTEST_START_DATE/END_DATE.
 Endpoint: /  (dashboard) | /trades.csv | /setups.txt (format txt per entry: Coin, Dir, Hasil, Level, Tanggal level, Acuan, P, P tanggal, Swing, Swing tanggal, Mss tanggal) | /logs
 =======================================================================================================================
@@ -49,7 +49,7 @@ from pybit.unified_trading import HTTP
 # CONFIG (override via environment variable kalau perlu)
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
-INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '100.0'))   # modal awal, 1 akun bersama
+INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '1000.0'))   # modal awal, 1 akun bersama
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
 FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0006'))
 FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
@@ -66,14 +66,16 @@ STRATEGY         = os.environ.get('STRATEGY', 'multi_acuan').strip().lower()
 NS_SWING_EXT     = int(os.environ.get('NS_SWING_EXT', 5))            # titik terjauh harus swing: N candle H1 kiri & kanan tidak melebihi
 NS_LOOKBACK      = int(os.environ.get('NS_LOOKBACK', 20))            # FVG lama boleh dari N candle M5 sebelum acuan tersentuh
 NS_MSS_SWING     = int(os.environ.get('NS_MSS_SWING', 1))            # swing fractal M5 utk MSS: N candle kiri & kanan (default 1)
-NS_SW_EQUAL      = os.environ.get('NS_SW_EQUAL', 'invalid').strip().lower()   # swing fractal: angka sama dgn tetangga kiri/kanan: 'invalid' (default, sama = BUKAN swing) | 'valid' (sama boleh, cara lama)
+NS_SW_EQUAL      = os.environ.get('NS_SW_EQUAL', 'merge').strip().lower()   # swing fractal M5, angka sama pada candle berurutan: 'merge' (default, dijadikan SATU KESATUAN: candle sebelum & sesudah kesatuan tidak boleh melebihi/sama) | 'invalid' (sama = bukan swing) | 'valid' (sama boleh, cara lama)
+NS_H1_EQUAL      = os.environ.get('NS_H1_EQUAL', 'merge').strip().lower()   # P & swing H1, angka sama pada candle berurutan: 'merge' (default, satu kesatuan) | 'invalid' (sama = tidak valid)
 NS_MSS_REF       = os.environ.get('NS_MSS_REF', 'range').strip().lower()   # 'range' (default): swing = tertinggi/terendah antara P lama & P baru, dihitung ulang tiap P bergeser | 'range_max' (swing tak pernah turun) | 'fractal' (lama)
-NS_P_EQUAL       = os.environ.get('NS_P_EQUAL', 'invalid').strip().lower()   # low/high P sama persis dgn tetangga kiri/kanan: 'invalid' (default, sama = P TIDAK valid) | 'valid' (sama dianggap boleh, cara sebelumnya) | 'merge' (candle sama persis menggeser kandidat P ke candle terakhir, double-bottom dihitung 1 P)
+NS_P_EQUAL       = os.environ.get('NS_P_EQUAL', 'merge').strip().lower()   # P M5, angka sama pada candle berurutan: 'merge' (default, candle yg sama dijadikan SATU KESATUAN: candle sebelum & sesudah kesatuan tidak boleh melebihi/sama, candle sama berikutnya menyambung) | 'invalid' (sama dgn tetangga = P tidak valid) | 'valid' (sama boleh)
 NS_ENTRY_MODE    = os.environ.get('NS_ENTRY_MODE', 'limit_fvg').strip().lower()   # 'limit_fvg' (default): limit di FVG terdekat dgn MSS | 'market': entry market di close candle MSS (cara lama)
 NS_FVG_EDGE      = os.environ.get('NS_FVG_EDGE', 'near').strip().lower()     # titik limit di FVG: 'near' (tepi terdekat ke harga sekarang, default) | 'mid' | 'far'
 NS_MAX_ENTRY     = int(os.environ.get('NS_MAX_ENTRY', 5))           # maksimal entry per BOS (setelah SL boleh entry lagi di acuan lain, sampai batas ini); 0 = tak terbatas
-NS_ACUAN_MODE    = os.environ.get('NS_ACUAN_MODE', 'swing_antara').strip().lower()   # acuan H1: 'swing_antara' (default: P & swing H1 -- Long: P = HIGH valid, swing = LOW terendah di antara 2 P; Short: P = LOW valid, swing = HIGH tertinggi; titik acuan = swing) | 'swing_ditembus' (kebalikan peran P/swing; swing aktif setelah close H1 menembusnya) | 'level' (cara lama: level baru berFVG)
-NS_SL_BUF        = float(os.environ.get('NS_SL_BUF', '0.002'))       # buffer SL di luar ujung FVG (0.002 = 0.2%)
+NS_ACUAN_MODE    = os.environ.get('NS_ACUAN_MODE', 'swing_ditembus').strip().lower()   # acuan H1: 'swing_ditembus' (default: Long: P = LOW valid, swing = HIGH; Short: P = HIGH, swing = LOW; titik acuan = swing, aktif setelah close H1 menembusnya) | 'swing_antara' (peran dibalik: Long: P = HIGH, swing = LOW; aktif saat P valid confirmed) | 'level' (cara lama: level baru berFVG)
+NS_H1_P_EXCEED   = os.environ.get('NS_H1_P_EXCEED', '1').strip() not in ('0', 'false', 'False', '')   # P H1 baru HARUS melebihi P valid sebelumnya (lebih ekstrem, sama persis tidak); P pertama tidak punya swing. 0 = semua ekstrem valid dianggap P (cara sebelumnya)
+NS_SL_BUF        = float(os.environ.get('NS_SL_BUF', '0.00'))       # buffer SL di luar ujung FVG (0.002 = 0.2%)
 NS_RANGE_MELEBAR = os.environ.get('NS_RANGE_MODE', 'melebar').strip().lower() != 'tetap'   # range acuan melebar mengikuti titik terjauh berjalan
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
@@ -721,6 +723,39 @@ def _ns_overlap(pl, ph, pj, k, zl, zh, L5, H5):
     return any(max(a_, zl) < min(b_, zh) for a_, b_ in iv)
 
 
+def _ns_fractals(arr, lo, hi, N, sup, mode):
+    """Swing fractal pada arr[lo:hi] (Long: high, Short: low), N candle kiri & kanan harus STRIKT kurang ekstrem.
+    mode 'merge': candle berurutan dgn angka sama = SATU KESATUAN (kesatuan valid kalau N candle sebelum dan N candle sesudah kesatuan
+      strikt tidak melebihi/sama). mode 'invalid': angka sama dgn tetangga = bukan swing. mode 'valid': sama boleh (cara lama).
+    Return (list idx candle TERAKHIR tiap swing (menentukan kapan swing terkonfirmasi), dict {idx terakhir: idx candle PERTAMA kesatuan})."""
+    m = hi - lo
+    if m < 2 * N + 1:
+        return [], {}
+    seg = arr[lo:hi]
+    if mode == 'valid':
+        w = np.lib.stride_tricks.sliding_window_view(seg, 2 * N + 1)
+        c_ = w[:, N]
+        m_ = (c_ >= w.max(axis=1)) if sup else (c_ <= w.min(axis=1))
+        ids = (np.flatnonzero(m_) + lo + N).tolist()
+        return ids, {i: i for i in ids}
+    chg = np.flatnonzero(seg[1:] != seg[:-1]) + 1
+    starts = np.concatenate(([0], chg)); ends = np.concatenate((chg - 1, [m - 1]))
+    if mode != 'merge':
+        keep = ends == starts
+        starts, ends = starts[keep], ends[keep]
+    ok = (starts - N >= 0) & (ends + N < m)
+    starts, ends = starts[ok], ends[ok]
+    v = seg[starts]
+    good = np.ones(len(v), dtype=bool)
+    for kk in range(1, N + 1):
+        if sup:
+            good &= (seg[starts - kk] < v) & (seg[ends + kk] < v)
+        else:
+            good &= (seg[starts - kk] > v) & (seg[ends + kk] > v)
+    st = (starts[good] + lo).tolist(); en = (ends[good] + lo).tolist()
+    return en, dict(zip(en, st))
+
+
 def _ns_find_mss(sup, tj0, stop, H5, L5, C5):
     """Market Structure Shift M5 setelah acuan tersentuh di candle tj0 (SMC).
     Long : harga turun ke acuan, low terendah = P. MSS = candle M5 pertama yang CLOSE di atas swing high referensi.
@@ -744,16 +779,7 @@ def _ns_find_mss(sup, tj0, stop, H5, L5, C5):
     lo = max(tj0 - NS_LOOKBACK, 0)
     arr = H5 if sup else L5
     use_range = (NS_MSS_REF != 'fractal')
-    sw = []
-    if hi - lo >= 2 * N + 1:
-        w = np.lib.stride_tricks.sliding_window_view(arr[lo:hi], 2 * N + 1)
-        c_ = w[:, N]
-        if NS_SW_EQUAL == 'valid':      # cara lama: sama boleh
-            m_ = (c_ >= w.max(axis=1)) if sup else (c_ <= w.min(axis=1))
-        else:                           # sama persis dgn salah satu tetangga = bukan swing
-            lf, rt = w[:, :N], w[:, N + 1:]
-            m_ = ((c_ > lf.max(axis=1)) & (c_ > rt.max(axis=1))) if sup else ((c_ < lf.min(axis=1)) & (c_ < rt.min(axis=1)))
-        sw = (np.flatnonzero(m_) + lo + N).tolist()
+    sw, sw_first = _ns_fractals(arr, lo, hi, N, sup, NS_SW_EQUAL)
     if not sw and not use_range:
         return None
     more = (lambda a, b: L5[a] < L5[b]) if sup else (lambda a, b: H5[a] > H5[b])        # a lebih ekstrem dari b
@@ -762,25 +788,35 @@ def _ns_find_mss(sup, tj0, stop, H5, L5, C5):
         ok_nb = (lambda a, b: L5[b] > L5[a]) if sup else (lambda a, b: H5[b] < H5[a])
     else:           # sama dianggap boleh
         ok_nb = (lambda a, b: L5[b] >= L5[a]) if sup else (lambda a, b: H5[b] <= H5[a])
-    cand = tj0
-    left_ok = (tj0 - 1 < 0) or ok_nb(tj0, tj0 - 1)
-    Pv = None; rref = None
+    merge = (NS_P_EQUAL == 'merge')
+    ext5 = L5 if sup else H5
+    cand = tj0; cand_last = tj0
+    if merge:       # kesatuan angka sama: ikut melebar ke kiri (candle sebelum sentuh yg angkanya sama), lalu tetangga kiri harus STRIKT kurang ekstrem
+        while cand - 1 >= 0 and ext5[cand - 1] == ext5[tj0]:
+            cand -= 1
+        left_ok = (cand - 1 < 0) or ((ext5[cand - 1] > ext5[cand]) if sup else (ext5[cand - 1] < ext5[cand]))
+    else:
+        left_ok = (tj0 - 1 < 0) or ok_nb(tj0, tj0 - 1)
+    Pv = None; Pv_last = None; rref = None
     for t in range(tj0 + 1, hi):
-        if more(t, cand) or (NS_P_EQUAL == 'merge' and ((L5[t] == L5[cand]) if sup else (H5[t] == H5[cand]))):   # ekstrem baru -> kandidat lama gugur
-            cand = t; left_ok = True
+        if more(t, cand):                               # ekstrem baru -> kandidat lama gugur
+            cand = t; cand_last = t; left_ok = True
             continue
-        # candle t tidak melampaui cand: cek sisi kanan (candle tepat setelah cand), lalu cand = P valid kalau sisi kirinya juga aman
-        if t == cand + 1 and not ok_nb(cand, t):        # sama persis dgn candle kanan -> cand tidak valid
+        if merge and t == cand_last + 1 and ext5[t] == ext5[cand]:
+            cand_last = t                               # angka sama menyambung -> satu kesatuan, tunggu candle berikutnya
+            continue
+        # candle t tidak melampaui cand: cek sisi kanan (candle tepat setelah cand/kesatuan), lalu cand = P valid kalau sisi kirinya juga aman
+        if (not merge) and t == cand + 1 and not ok_nb(cand, t):    # sama persis dgn candle kanan -> cand tidak valid
             left_ok = False
         if Pv != cand and left_ok:
             if use_range and Pv is not None:
-                seg = H5[Pv:cand + 1] if sup else L5[Pv:cand + 1]
-                cx = Pv + int(seg.argmax() if sup else seg.argmin())
+                seg = H5[Pv_last:cand + 1] if sup else L5[Pv_last:cand + 1]
+                cx = Pv_last + int(seg.argmax() if sup else seg.argmin())
                 if NS_MSS_REF == 'range_max' and rref is not None and ((H5[cx] <= H5[rref]) if sup else (L5[cx] >= L5[rref])):
                     pass            # 'range_max': swing hanya naik/turun, tidak pernah diturunkan
                 else:
                     rref = cx       # 'range': swing dihitung ulang di SETIAP pergeseran P valid
-            Pv = cand
+            Pv = cand; Pv_last = cand_last
         if Pv != cand:
             continue
         if use_range and rref is not None:
@@ -789,7 +825,7 @@ def _ns_find_mss(sup, tj0, stop, H5, L5, C5):
             k = bisect.bisect_right(sw, min(cand - 1, t - N)) - 1
             if k < 0:
                 continue
-            ref = sw[k]
+            ref = sw_first[sw[k]]
         if (C5[t] > H5[ref]) if sup else (C5[t] < L5[ref]):
             return t, cand, ref
     return None
@@ -821,38 +857,70 @@ def _ns_find_fvg(sup, P, q, stop, X):
 def _ns_h1_swings(sup, bi, hh, hl, hc, mode):
     """Acuan H1 dgn metode 'P dan swing' (seperti M5). Mulai SETELAH break-in (candle bi).
     Mode 'swing_antara' (default): Long: P = HIGH valid, swing = LOW; Short: P = LOW valid, swing = HIGH. P valid = candle H1 yang high-nya (Long)
-      LEBIH TINGGI dari 1 candle kiri DAN 1 candle kanan (sama persis = tidak valid); Short: low-nya lebih rendah dari kedua tetangga.
+      LEBIH TINGGI dari candle sebelum dan sesudahnya; Short: low-nya lebih rendah. Angka SAMA pada candle berurutan dijadikan SATU KESATUAN
+      (NS_H1_EQUAL='merge', default): kesatuan itu valid kalau candle sebelum kesatuan dan candle sesudah kesatuan strikt tidak melebihi/sama.
+      NS_H1_EQUAL='invalid': angka sama dgn tetangga = tidak valid.
       Mode 'swing_ditembus' membalik peran: Long: P = low, swing = high (Short sebaliknya).
-    Swing = ekstrem lawan P (Long/swing_ditembus: HIGH tertinggi) di antara P valid lama dan P valid baru (candle P-nya sendiri tidak ikut; untuk swing pertama dihitung dari candle bi).
-      Swing juga harus strikt lebih ekstrem dari 1 candle kiri & kanannya (sama persis = bukan swing).
+    P baru juga HARUS melebihi P valid sebelumnya (Long/swing_antara: high lebih tinggi; Short: low lebih rendah; sama persis tidak) -- ekstrem valid yang tidak melebihi
+      P sebelumnya bukan P. P valid pertama belum punya swing. NS_H1_P_EXCEED=0 mematikan syarat ini.
+    Swing = ekstrem lawan P (Long/swing_antara: LOW terendah) di antara P valid lama dan P valid baru (candle P-nya sendiri tidak ikut); swing juga harus valid
+      (strikt lebih ekstrem dari candle sebelum & sesudahnya, kesatuan angka sama dihitung satu).
     Titik acuan = swing. 'swing_ditembus': acuan baru aktif setelah candle H1 pertama (sesudah P valid baru confirmed) yang CLOSE menembus swing
-      (Long: close > swing high, Short: close < swing low) -> swing jadi area retest. 'swing_antara': aktif begitu P valid baru confirmed.
-    Return list (idx H1 candle swing, idx H1 candle saat acuan aktif)."""
+      (Long: close > swing high, Short: close < swing low). 'swing_antara': aktif begitu P valid baru confirmed (candle sesudah kesatuan P closed).
+    Return list (idx H1 candle swing [pertama di kesatuan], idx H1 candle saat acuan aktif)."""
     n = len(hc)
     p_low = (sup if mode == 'swing_ditembus' else (not sup))      # P = low?
     pv, sv = (hl, hh) if p_low else (hh, hl)
-    out = []; prev = None
-    for k in range(bi + 1, n - 1):
-        if not ((pv[k] < pv[k - 1] and pv[k] < pv[k + 1]) if p_low else (pv[k] > pv[k - 1] and pv[k] > pv[k + 1])):
+    merge = (NS_H1_EQUAL == 'merge')
+    # a "tidak melebihi" b: P low -> low tetangga lebih tinggi; P high -> high tetangga lebih rendah (strikt)
+    below_p = (lambda a, b: a > b) if p_low else (lambda a, b: a < b)
+    below_s = (lambda a, b: a < b) if p_low else (lambda a, b: a > b)    # swing: high -> tetangga lebih rendah; low -> tetangga lebih tinggi
+    out = []; prev = None                                          # prev = (idx pertama, idx terakhir) kesatuan P valid terakhir
+    k = bi + 1
+    while k < n - 1:
+        if pv[k - 1] == pv[k]:                                     # kesatuan dimulai sebelum k (sebelum/di bi) -> lewati
+            k += 1; continue
+        f = l = k
+        if merge:
+            while l + 1 < n and pv[l + 1] == pv[f]:
+                l += 1
+        k = l + 1 if merge else k + 1
+        if l + 1 >= n:
+            break
+        if not (below_p(pv[f - 1], pv[f]) and below_p(pv[l + 1], pv[f])):
             continue                                              # bukan P valid
-        a0 = bi if prev is None else prev + 1                     # candle P lama & P baru tidak ikut dihitung (di antara keduanya); P lama pertama = candle bi (ikut)
-        prev = k
-        seg = sv[a0:k]
+        if NS_H1_P_EXCEED:
+            if prev is None:                                      # P valid pertama: belum ada P sebelumnya -> belum ada swing
+                prev = (f, l)
+                continue
+            if not (pv[f] < pv[prev[0]] if p_low else pv[f] > pv[prev[0]]):
+                continue                                          # tidak melebihi P sebelumnya -> bukan P
+            a0 = prev[1] + 1
+        else:
+            a0 = bi if prev is None else prev[1] + 1              # (cara sebelumnya) P lama pertama = candle bi
+        prev = (f, l)                                             # candle P lama & P baru tidak ikut dihitung (swing di antara keduanya)
+        seg = sv[a0:f]
         if len(seg) == 0:
             continue
         sidx = a0 + int(seg.argmax() if p_low else seg.argmin())
-        if sidx < 1 or sidx + 1 >= n:
+        sf = sl = sidx
+        if merge:                                                 # kesatuan angka sama pada swing
+            while sf - 1 >= 0 and sv[sf - 1] == sv[sidx]:
+                sf -= 1
+            while sl + 1 < n and sv[sl + 1] == sv[sidx]:
+                sl += 1
+        if sf < 1 or sl + 1 >= n:
             continue
-        if not ((sv[sidx] > sv[sidx - 1] and sv[sidx] > sv[sidx + 1]) if p_low else (sv[sidx] < sv[sidx - 1] and sv[sidx] < sv[sidx + 1])):
-            continue                                              # swing tidak valid (sama dgn tetangga)
+        if not (below_s(sv[sf - 1], sv[sf]) and below_s(sv[sl + 1], sv[sf])):
+            continue                                              # swing tidak valid (tetangga melebihi/sama)
         if mode == 'swing_ditembus':
-            tail = hc[k + 1:] > sv[sidx] if p_low else hc[k + 1:] < sv[sidx]
+            tail = hc[l + 1:] > sv[sf] if p_low else hc[l + 1:] < sv[sf]
             if not tail.any():
                 continue
-            live = k + 1 + int(tail.argmax())
+            live = l + 1 + int(tail.argmax())
         else:
-            live = k + 1
-        out.append((sidx, live))
+            live = l + 1
+        out.append((sf, live))
     return out
 
 
