@@ -2,7 +2,7 @@
 backtest_web.py — DEFAULT: STRATEGY=multi_acuan  (S&R H1 berFVG -> break-out/break-in -> BOS -> multi-acuan -> MSS M5)
 Strategi lama (EMA21/30 + IFVG limit + target level lawan) tetap ada: set env STRATEGY=ifvg_ema.
 Aturan lengkap strategi baru ada di komentar blok "STRATEGI BARU" (cari 'STRATEGI BARU' di file ini).
-Env strategi baru: NS_SWING_EXT=5, NS_LOOKBACK=20, NS_MSS_SWING=1, NS_SL_BUF=0.002, NS_RANGE_MODE=melebar|tetap, NS_ENTRY_MODE=limit_fvg|market, NS_FVG_EDGE=near|mid|far, NS_MAX_ENTRY=5 (0 = tak terbatas).
+Env strategi baru: NS_SWING_EXT=5, NS_LOOKBACK=20, NS_MSS_SWING=1, NS_SL_BUF=0.002, NS_RANGE_MODE=melebar|tetap, NS_ACUAN_MODE=swing_ditembus|swing_antara|level, NS_ENTRY_MODE=limit_fvg|market, NS_FVG_EDGE=near|mid|far, NS_MAX_ENTRY=5 (0 = tak terbatas).
 Env umum: RISK_PCT, INITIAL_BALANCE, FEE_ENTRY_PCT, FEE_EXIT_PCT, LEVERAGE, MAX_CONCURRENT, BACKTEST_START_DATE/END_DATE.
 Endpoint: /  (dashboard) | /trades.csv | /setups.txt (format txt per entry: Coin, Dir, Hasil, Level, Tanggal level, Acuan, P, P tanggal, Swing, Swing tanggal, Mss tanggal) | /logs
 =======================================================================================================================
@@ -51,8 +51,8 @@ from pybit.unified_trading import HTTP
 PORT             = int(os.environ.get('PORT', 8080))
 INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '1000.0'))   # modal awal, 1 akun bersama
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
-FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0006'))
-FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
+FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
+FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
 
 EMA_BIAS_FILTER  = os.environ.get('EMA_BIAS_FILTER', '1').strip() not in ('0', 'false', 'False', '')
 BIAS_EMA_FAST    = int(os.environ.get('BIAS_EMA_FAST', 21))
@@ -72,13 +72,14 @@ NS_P_EQUAL       = os.environ.get('NS_P_EQUAL', 'invalid').strip().lower()   # l
 NS_ENTRY_MODE    = os.environ.get('NS_ENTRY_MODE', 'limit_fvg').strip().lower()   # 'limit_fvg' (default): limit di FVG terdekat dgn MSS | 'market': entry market di close candle MSS (cara lama)
 NS_FVG_EDGE      = os.environ.get('NS_FVG_EDGE', 'near').strip().lower()     # titik limit di FVG: 'near' (tepi terdekat ke harga sekarang, default) | 'mid' | 'far'
 NS_MAX_ENTRY     = int(os.environ.get('NS_MAX_ENTRY', 5))           # maksimal entry per BOS (setelah SL boleh entry lagi di acuan lain, sampai batas ini); 0 = tak terbatas
+NS_ACUAN_MODE    = os.environ.get('NS_ACUAN_MODE', 'swing_ditembus').strip().lower()   # acuan H1: 'swing_ditembus' (default: P & swing H1, swing = acuan setelah close H1 menembusnya) | 'swing_antara' (P = ekstrem searah trade, swing = ekstrem lawan di antara 2 P, live saat P valid) | 'level' (cara lama: level baru berFVG)
 NS_SL_BUF        = float(os.environ.get('NS_SL_BUF', '0.002'))       # buffer SL di luar ujung FVG (0.002 = 0.2%)
 NS_RANGE_MELEBAR = os.environ.get('NS_RANGE_MODE', 'melebar').strip().lower() != 'tetap'   # range acuan melebar mengikuti titik terjauh berjalan
 
-LEVERAGE           = float(os.environ.get('LEVERAGE', '25'))
+LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
 
-MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '10').strip().lower()
+MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '0').strip().lower()
 MAX_CONCURRENT = float('inf') if MAX_CONCURRENT_RAW in ('', '0', 'unlimited', 'inf') else int(MAX_CONCURRENT_RAW)
 
 ALLOW_HEDGE      = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
@@ -817,6 +818,43 @@ def _ns_find_fvg(sup, P, q, stop, X):
     return k, float(H5[k]), float(L5[k - 2])
 
 
+def _ns_h1_swings(sup, bi, hh, hl, hc, mode):
+    """Acuan H1 dgn metode 'P dan swing' (seperti M5). Mulai SETELAH break-in (candle bi).
+    P valid = candle H1 yang low-nya (Long, mode swing_ditembus) LEBIH RENDAH dari 1 candle kiri DAN 1 candle kanan (sama persis = tidak valid);
+      Short: high-nya lebih tinggi dari kedua tetangga. Mode 'swing_antara' membalik peran: Long: P = high, swing = low (Short sebaliknya).
+    Swing = ekstrem lawan P (Long/swing_ditembus: HIGH tertinggi) di antara P valid lama dan P valid baru (candle P-nya sendiri tidak ikut; untuk swing pertama dihitung dari candle bi).
+      Swing juga harus strikt lebih ekstrem dari 1 candle kiri & kanannya (sama persis = bukan swing).
+    Titik acuan = swing. 'swing_ditembus': acuan baru aktif setelah candle H1 pertama (sesudah P valid baru confirmed) yang CLOSE menembus swing
+      (Long: close > swing high, Short: close < swing low) -> swing jadi area retest. 'swing_antara': aktif begitu P valid baru confirmed.
+    Return list (idx H1 candle swing, idx H1 candle saat acuan aktif)."""
+    n = len(hc)
+    p_low = (sup if mode == 'swing_ditembus' else (not sup))      # P = low?
+    pv, sv = (hl, hh) if p_low else (hh, hl)
+    out = []; prev = None
+    for k in range(bi + 1, n - 1):
+        if not ((pv[k] < pv[k - 1] and pv[k] < pv[k + 1]) if p_low else (pv[k] > pv[k - 1] and pv[k] > pv[k + 1])):
+            continue                                              # bukan P valid
+        a0 = bi if prev is None else prev + 1                     # candle P lama & P baru tidak ikut dihitung (di antara keduanya); P lama pertama = candle bi (ikut)
+        prev = k
+        seg = sv[a0:k]
+        if len(seg) == 0:
+            continue
+        sidx = a0 + int(seg.argmax() if p_low else seg.argmin())
+        if sidx < 1 or sidx + 1 >= n:
+            continue
+        if not ((sv[sidx] > sv[sidx - 1] and sv[sidx] > sv[sidx + 1]) if p_low else (sv[sidx] < sv[sidx - 1] and sv[sidx] < sv[sidx + 1])):
+            continue                                              # swing tidak valid (sama dgn tetangga)
+        if mode == 'swing_ditembus':
+            tail = hc[k + 1:] > sv[sidx] if p_low else hc[k + 1:] < sv[sidx]
+            if not tail.any():
+                continue
+            live = k + 1 + int(tail.argmax())
+        else:
+            live = k + 1
+        out.append((sidx, live))
+    return out
+
+
 def ns_chain(S, LV, X):
     """Satu setup (sudah BOS) -> urutan trade (harga saja) + status akhir.
     X = array konteks M5/H1 (lihat ns_detect_events). Return (trades, status)."""
@@ -828,18 +866,31 @@ def ns_chain(S, LV, X):
     seen0 = max(int(hts[bos]) + H1_MS, S['vf'])
     s0 = int(np.searchsorted(ts5, seen0))
     # --- semua level acuan dalam range ---
-    acs = []
-    for x in LV:
-        if x['ty'] != S['ty'] or x['c1'] <= bi:
-            continue
-        c4 = x['c4']
-        if NS_RANGE_MELEBAR:
-            rext = float(hh[i:c4 + 1].max()) if sup else float(hl[i:c4 + 1].min())
-        else:
-            rext = ext
-        if ((lvl <= x['L'] <= rext) if sup else (rext <= x['L'] <= lvl)):
-            av = max(int(hts[c4]) + H1_MS, seen0)
-            acs.append((int(np.searchsorted(ts5, av)), x['L']))
+    acs = []; ac_time = {}
+    if NS_ACUAN_MODE in ('swing_ditembus', 'swing_antara'):
+        # acuan = swing H1 (metode P & swing seperti M5)
+        sv_ = hl if (NS_ACUAN_MODE == 'swing_ditembus') != sup else hh        # array swing: Long/ditembus -> high, Short/ditembus -> low
+        for sidx, live in _ns_h1_swings(sup, bi, hh, hl, X['hc'], NS_ACUAN_MODE):
+            A = float(sv_[sidx])
+            if NS_RANGE_MELEBAR:
+                rext = float(hh[i:live + 1].max()) if sup else float(hl[i:live + 1].min())
+            else:
+                rext = ext
+            if ((lvl <= A <= rext) if sup else (rext <= A <= lvl)):
+                av = max(int(hts[live]) + H1_MS, seen0)
+                acs.append((int(np.searchsorted(ts5, av)), A)); ac_time.setdefault(A, int(hts[sidx]))
+    else:
+        for x in LV:
+            if x['ty'] != S['ty'] or x['c1'] <= bi:
+                continue
+            c4 = x['c4']
+            if NS_RANGE_MELEBAR:
+                rext = float(hh[i:c4 + 1].max()) if sup else float(hl[i:c4 + 1].min())
+            else:
+                rext = ext
+            if ((lvl <= x['L'] <= rext) if sup else (rext <= x['L'] <= lvl)):
+                av = max(int(hts[c4]) + H1_MS, seen0)
+                acs.append((int(np.searchsorted(ts5, av)), x['L']))
     acs.sort()
     if not acs:
         return [], 'tanpa_acuan'
@@ -956,7 +1007,7 @@ def ns_chain(S, LV, X):
         tr = {'touch': tj0, 'q': q, 'entry': entry, 'sl': slv, 'tp': tp,
               'acuan': (max(touched) if sup else min(touched)), 'P': P, 'ref': ref, 'f': f_fill, 'fvg': fvg}
         _a_px = tr['acuan']
-        tr['ac_ts'] = next((int(hts[x['c1']]) for x in LV if x['ty'] == S['ty'] and x['c1'] > bi and x['L'] == _a_px), None)
+        tr['ac_ts'] = ac_time.get(_a_px) if ac_time else next((int(hts[x['c1']]) for x in LV if x['ty'] == S['ty'] and x['c1'] > bi and x['L'] == _a_px), None)
         if si >= n5 and ti >= n5:
             tr.update(why='Open', z=n5 - 1); trades.append(tr); status = 'terbuka'; break
         if si <= ti:
