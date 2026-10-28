@@ -2,7 +2,7 @@
 backtest_web.py — DEFAULT: STRATEGY=multi_acuan  (S&R H1 berFVG -> break-out/break-in -> BOS -> multi-acuan -> MSS M5)
 Strategi lama (EMA21/30 + IFVG limit + target level lawan) tetap ada: set env STRATEGY=ifvg_ema.
 Aturan lengkap strategi baru ada di komentar blok "STRATEGI BARU" (cari 'STRATEGI BARU' di file ini).
-Env strategi baru: NS_SWING_EXT=5, NS_LOOKBACK=20, NS_MSS_SWING=1, NS_SL_BUF=0.002, NS_RANGE_MODE=melebar|tetap, NS_ACUAN_MODE=swing_ditembus|swing_antara|level, NS_ENTRY_MODE=limit_fvg|market, NS_FVG_EDGE=near|mid|far, NS_MAX_ENTRY=5 (0 = tak terbatas).
+Env strategi baru: NS_SWING_EXT=5, NS_LOOKBACK=20, NS_MSS_SWING=1, NS_SL_BUF=0.002, NS_RANGE_MODE=melebar|tetap, NS_ACUAN_MODE=swing_antara|swing_ditembus|level, NS_ENTRY_MODE=limit_fvg|market, NS_FVG_EDGE=near|mid|far, NS_MAX_ENTRY=5 (0 = tak terbatas).
 Env umum: RISK_PCT, INITIAL_BALANCE, FEE_ENTRY_PCT, FEE_EXIT_PCT, LEVERAGE, MAX_CONCURRENT, BACKTEST_START_DATE/END_DATE.
 Endpoint: /  (dashboard) | /trades.csv | /setups.txt (format txt per entry: Coin, Dir, Hasil, Level, Tanggal level, Acuan, P, P tanggal, Swing, Swing tanggal, Mss tanggal) | /logs
 =======================================================================================================================
@@ -49,10 +49,10 @@ from pybit.unified_trading import HTTP
 # CONFIG (override via environment variable kalau perlu)
 # ============================================================
 PORT             = int(os.environ.get('PORT', 8080))
-INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '1000.0'))   # modal awal, 1 akun bersama
+INITIAL_BALANCE  = float(os.environ.get('INITIAL_BALANCE', '100.0'))   # modal awal, 1 akun bersama
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.01'))          # risk per trade dari balance (compound)
-FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.001'))
-FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.001 * 3)))
+FEE_ENTRY_PCT    = float(os.environ.get('FEE_ENTRY_PCT', '0.0006'))
+FEE_EXIT_PCT     = float(os.environ.get('FEE_EXIT_PCT', str(0.0006 * 3)))
 
 EMA_BIAS_FILTER  = os.environ.get('EMA_BIAS_FILTER', '1').strip() not in ('0', 'false', 'False', '')
 BIAS_EMA_FAST    = int(os.environ.get('BIAS_EMA_FAST', 21))
@@ -72,14 +72,14 @@ NS_P_EQUAL       = os.environ.get('NS_P_EQUAL', 'invalid').strip().lower()   # l
 NS_ENTRY_MODE    = os.environ.get('NS_ENTRY_MODE', 'limit_fvg').strip().lower()   # 'limit_fvg' (default): limit di FVG terdekat dgn MSS | 'market': entry market di close candle MSS (cara lama)
 NS_FVG_EDGE      = os.environ.get('NS_FVG_EDGE', 'near').strip().lower()     # titik limit di FVG: 'near' (tepi terdekat ke harga sekarang, default) | 'mid' | 'far'
 NS_MAX_ENTRY     = int(os.environ.get('NS_MAX_ENTRY', 5))           # maksimal entry per BOS (setelah SL boleh entry lagi di acuan lain, sampai batas ini); 0 = tak terbatas
-NS_ACUAN_MODE    = os.environ.get('NS_ACUAN_MODE', 'swing_ditembus').strip().lower()   # acuan H1: 'swing_ditembus' (default: P & swing H1, swing = acuan setelah close H1 menembusnya) | 'swing_antara' (P = ekstrem searah trade, swing = ekstrem lawan di antara 2 P, live saat P valid) | 'level' (cara lama: level baru berFVG)
+NS_ACUAN_MODE    = os.environ.get('NS_ACUAN_MODE', 'swing_antara').strip().lower()   # acuan H1: 'swing_antara' (default: P & swing H1 -- Long: P = HIGH valid, swing = LOW terendah di antara 2 P; Short: P = LOW valid, swing = HIGH tertinggi; titik acuan = swing) | 'swing_ditembus' (kebalikan peran P/swing; swing aktif setelah close H1 menembusnya) | 'level' (cara lama: level baru berFVG)
 NS_SL_BUF        = float(os.environ.get('NS_SL_BUF', '0.002'))       # buffer SL di luar ujung FVG (0.002 = 0.2%)
 NS_RANGE_MELEBAR = os.environ.get('NS_RANGE_MODE', 'melebar').strip().lower() != 'tetap'   # range acuan melebar mengikuti titik terjauh berjalan
 
 LEVERAGE           = float(os.environ.get('LEVERAGE', '50'))
 MARGIN_USAGE_CAP    = float(os.environ.get('MARGIN_USAGE_CAP', '0.90'))
 
-MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '0').strip().lower()
+MAX_CONCURRENT_RAW = os.environ.get('MAX_CONCURRENT', '10').strip().lower()
 MAX_CONCURRENT = float('inf') if MAX_CONCURRENT_RAW in ('', '0', 'unlimited', 'inf') else int(MAX_CONCURRENT_RAW)
 
 ALLOW_HEDGE      = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
@@ -820,8 +820,9 @@ def _ns_find_fvg(sup, P, q, stop, X):
 
 def _ns_h1_swings(sup, bi, hh, hl, hc, mode):
     """Acuan H1 dgn metode 'P dan swing' (seperti M5). Mulai SETELAH break-in (candle bi).
-    P valid = candle H1 yang low-nya (Long, mode swing_ditembus) LEBIH RENDAH dari 1 candle kiri DAN 1 candle kanan (sama persis = tidak valid);
-      Short: high-nya lebih tinggi dari kedua tetangga. Mode 'swing_antara' membalik peran: Long: P = high, swing = low (Short sebaliknya).
+    Mode 'swing_antara' (default): Long: P = HIGH valid, swing = LOW; Short: P = LOW valid, swing = HIGH. P valid = candle H1 yang high-nya (Long)
+      LEBIH TINGGI dari 1 candle kiri DAN 1 candle kanan (sama persis = tidak valid); Short: low-nya lebih rendah dari kedua tetangga.
+      Mode 'swing_ditembus' membalik peran: Long: P = low, swing = high (Short sebaliknya).
     Swing = ekstrem lawan P (Long/swing_ditembus: HIGH tertinggi) di antara P valid lama dan P valid baru (candle P-nya sendiri tidak ikut; untuk swing pertama dihitung dari candle bi).
       Swing juga harus strikt lebih ekstrem dari 1 candle kiri & kanannya (sama persis = bukan swing).
     Titik acuan = swing. 'swing_ditembus': acuan baru aktif setelah candle H1 pertama (sesudah P valid baru confirmed) yang CLOSE menembus swing
